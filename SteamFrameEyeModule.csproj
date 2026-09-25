@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SteamFrameEyeModule</AssemblyName>
+    <RootNamespace>SteamFrameEyeModule</RootNamespace>
+    <Version>0.1.0</Version>
+    <Platforms>AnyCPU</Platforms>
+    <!-- VRCFT 5.4.x ships as a self-contained .NET 10 app; modules are loaded into its
+         VRCFaceTracking.ModuleProcess sandbox, so reference the installed assemblies and
+         do not copy them next to the module DLL. Override with -p:VrcftDir=... -->
+    <VrcftDir Condition="'$(VrcftDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\VRCFaceTracking</VrcftDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="VRCFaceTracking.SDK">
+      <HintPath>$(VrcftDir)\VRCFaceTracking.SDK.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="VRCFaceTracking.Core">
+      <HintPath>$(VrcftDir)\VRCFaceTracking.Core.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Logging.Abstractions">
+      <HintPath>$(VrcftDir)\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>
