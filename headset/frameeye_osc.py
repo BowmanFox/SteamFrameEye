@@ -6,21 +6,26 @@ Reads the eye-tracking server's shared-memory object /dev/shm/eye-server.mmap
 (per-eye gaze direction, fixation point, eyelid openness) and forwards it:
 
   --raw HOST:PORT     compact binary packet per sample, for the SteamFrameEyeModule
-                      VRCFaceTracking module on the PC (recommended: VRCFT stays the hub)
+                      VRCFaceTracking module on the PC (repeatable)
   --target HOST:PORT  VRCFT "v2" avatar parameters as OSC straight to VRChat
-                      (use when no VRCFT is running; "none" disables)
+                      (use when no VRCFT is running)
+
+Runs stand-alone (CLI, e.g. from a systemd user unit) or embedded in
+frameeye_overlay.py, the SteamVR overlay application, through SenderRuntime.
 
 Data layout and the OSC contract follow konsti219/frameeyeosc (Rust, MIT License,
 Copyright (c) 2026 konsti219): https://github.com/konsti219/frameeyeosc
 Dependency-free Python re-implementation so it runs on stock SteamOS.
 """
 import argparse
+import logging
 import math
 import mmap
 import os
 import socket
 import struct
 import sys
+import threading
 import time
 
 MMAP_PATH = "/dev/shm/eye-server.mmap"
@@ -40,6 +45,11 @@ RAW_FMT = "<4sHHId3f3f3f2f3f3fd"
 RAW_VERSION = 1
 
 SCALE = 4.0 / math.pi
+DEFAULT_POLL_MS = 4.0
+STALE_SECONDS = 1.5           # no new sample for this long -> "idle" (headset not worn / standby)
+REOPEN_SECONDS = 2.0
+
+log = logging.getLogger("frameeye.sender")
 
 
 def clamp(v, lo, hi):
@@ -80,18 +90,22 @@ def record_valid(r):
     return all(math.isfinite(v) for v in vals)
 
 
-def build_osc(r, prefix):
+def derived_values(r):
+    """(lx, ly, rx, ry, cx, cy, lid_l, lid_r) as sent in the v2 parameters."""
     lx, ly = gaze_angles(r["gaze"][0])
     rx, ry = gaze_angles(r["gaze"][1])
     cx, cy = gaze_angles(r["fixation"])
-    lid_l = clamp(r["openness"][0], 0.0, 1.0)
-    lid_r = clamp(r["openness"][1], 0.0, 1.0)
+    return (lx, ly, rx, ry, cx, cy, clamp(r["openness"][0], 0.0, 1.0), clamp(r["openness"][1], 0.0, 1.0))
+
+
+def build_osc(r, prefix):
+    lx, ly, rx, ry, cx, cy, lid_l, lid_r = vals = derived_values(r)
     base = "/avatar/parameters" + prefix
     msgs = [osc_true(base + "/EyeTrackingActive")]
     for suffix, val in (("EyeLeftX", lx), ("EyeLeftY", ly), ("EyeRightX", rx), ("EyeRightY", ry),
                         ("EyeX", cx), ("EyeY", cy), ("EyeLidLeft", lid_l), ("EyeLidRight", lid_r)):
         msgs.append(osc_float(base + "/v2/" + suffix, float(val)))
-    return msgs, (lx, ly, rx, ry, cx, cy, lid_l, lid_r)
+    return msgs, vals
 
 
 def build_raw(r, seq, valid):
@@ -102,88 +116,215 @@ def build_raw(r, seq, valid):
 
 def parse_hostport(s):
     host, _, port = s.rpartition(":")
+    if not host or not port.isdigit():
+        raise ValueError("expected HOST:PORT, got %r" % s)
     return (host, int(port))
 
 
-def open_mmap():
-    fd = os.open(MMAP_PATH, os.O_RDONLY)
+def open_mmap(path):
+    fd = os.open(path, os.O_RDONLY)
     try:
         size = os.fstat(fd).st_size
         if size < EYE_DATA_OFF + EYE_DATA_LEN:
-            raise RuntimeError("unexpected mmap size %d" % size)
+            raise OSError("unexpected mmap size %d" % size)
         return mmap.mmap(fd, size, access=mmap.ACCESS_READ)
     finally:
         os.close(fd)
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description="Steam Frame eye tracking -> network")
-    ap.add_argument("--raw", default="none", help="HOST:PORT for the binary feed to the VRCFT module (or 'none')")
-    ap.add_argument("--target", default="none", help="HOST:PORT for direct VRChat OSC v2 parameters (or 'none')")
+    ap.add_argument("--raw", action="append", default=[], metavar="HOST:PORT",
+                    help="binary feed for the VRCFT module on the PC (repeatable)")
+    ap.add_argument("--target", default=None, metavar="HOST:PORT",
+                    help="direct VRChat OSC v2 parameters (when no VRCFT is used)")
     ap.add_argument("--prefix", default="/FT", help="avatar parameter prefix for --target, must start with '/'")
-    ap.add_argument("--poll-ms", type=float, default=4.0, help="poll interval for the sequence counter")
+    ap.add_argument("--poll-ms", type=float, default=DEFAULT_POLL_MS, help="poll interval for the sequence counter")
+    ap.add_argument("--mmap", default=MMAP_PATH, help="eye server shared memory object")
     ap.add_argument("--once", action="store_true", help="send the current record once and exit")
-    ap.add_argument("--verbose", action="store_true", help="print the values being sent")
-    args = ap.parse_args()
-    if not args.prefix.startswith("/"):
-        sys.exit("--prefix must start with '/'")
-    raw_target = None if args.raw == "none" else parse_hostport(args.raw)
-    osc_target = None if args.target == "none" else parse_hostport(args.target)
-    if raw_target is None and osc_target is None:
-        sys.exit("nothing to do: give --raw HOST:PORT and/or --target HOST:PORT")
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    print("raw ->", raw_target, " osc ->", osc_target, flush=True)
+    ap.add_argument("--verbose", action="store_true", help="print every sample")
+    return ap
 
-    mm = None
-    last_seq = None
-    last_report = 0.0
-    sent = 0
-    while True:
-        if mm is None:
-            try:
-                mm = open_mmap()
-                last_seq = None
-                print("opened", MMAP_PATH, flush=True)
-            except OSError as e:
-                if args.once:
-                    sys.exit("cannot open %s: %s" % (MMAP_PATH, e))
-                time.sleep(2.0)
-                continue
-        try:
-            seq = struct.unpack_from("<I", mm, SEQ_OFF)[0]
-        except ValueError:
-            mm = None
-            continue
-        if seq != last_seq or args.once:
-            last_seq = seq
-            r = parse_record(mm)
-            valid = record_valid(r)
-            if raw_target is not None:
-                try:
-                    sock.sendto(build_raw(r, seq, valid), raw_target)
-                except OSError:
-                    pass
-            if valid and osc_target is not None:
-                msgs, _ = build_osc(r, args.prefix)
-                for m in msgs:
-                    try:
-                        sock.sendto(m, osc_target)
-                    except OSError:
-                        pass
-            if valid:
-                sent += 1
-            if args.verbose:
-                _, vals = build_osc(r, args.prefix)
-                print("seq=%d valid=%d t=%.3f L=(%.3f,%.3f) R=(%.3f,%.3f) C=(%.3f,%.3f) lids=(%.2f,%.2f)"
-                      % ((seq, int(valid), r["sample_time"]) + vals), flush=True)
-            if args.once:
-                return
+
+def runtime_args(args):
+    """The sender options of a parsed namespace as a command line, for the SteamVR manifest."""
+    out = []
+    for raw in args.raw:
+        out += ["--raw", raw]
+    if args.target:
+        out += ["--target", args.target]
+    if args.prefix != "/FT":
+        out += ["--prefix", args.prefix]
+    if args.poll_ms != DEFAULT_POLL_MS:
+        out += ["--poll-ms", str(args.poll_ms)]
+    if args.mmap != MMAP_PATH:
+        out += ["--mmap", args.mmap]
+    return out
+
+
+class SenderRuntime:
+    """Reads the eye server's shared memory in a thread and sends every new sample to the targets."""
+
+    def __init__(self, args):
+        if not args.prefix.startswith("/"):
+            raise ValueError("--prefix must start with '/'")
+        self.raw_targets = [parse_hostport(r) for r in args.raw if r and r != "none"]
+        self.osc_target = parse_hostport(args.target) if args.target and args.target != "none" else None
+        self.prefix = args.prefix
+        self.poll_s = max(0.001, args.poll_ms / 1000.0)
+        self.mmap_path = args.mmap
+        self.verbose = args.verbose
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._stop = threading.Event()
+        self._thread = None
+        self._lock = threading.Lock()
+        self._stats = dict(state="no-source", seq=None, samples=0, valid=0, rate=0.0, last_change=None,
+                           values=None, valid_last=False, opens=0, send_errors=0, started=time.monotonic())
+
+    # -- lifecycle
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, name="frameeye-sender", daemon=True)
+        self._thread.start()
+        return self
+
+    def stop(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(2.0)
+
+    def snapshot(self):
+        with self._lock:
+            s = dict(self._stats)
         now = time.monotonic()
-        if now - last_report > 60.0:
-            last_report = now
-            print("alive: %d valid samples sent, last seq %s" % (sent, last_seq), flush=True)
-        time.sleep(args.poll_ms / 1000.0)
+        s["age"] = None if s["last_change"] is None else now - s["last_change"]
+        s["uptime"] = int(now - s["started"])
+        s["raw_targets"] = ["%s:%d" % t for t in self.raw_targets]
+        s["osc_target"] = "%s:%d" % self.osc_target if self.osc_target else None
+        return s
+
+    # -- one sample
+
+    def send_record(self, mm, seq):
+        r = parse_record(mm)
+        valid = record_valid(r)
+        errors = 0
+        for target in self.raw_targets:
+            try:
+                self.sock.sendto(build_raw(r, seq, valid), target)
+            except OSError:
+                errors += 1
+        vals = derived_values(r) if valid else None
+        if valid and self.osc_target is not None:
+            msgs, _ = build_osc(r, self.prefix)
+            for m in msgs:
+                try:
+                    self.sock.sendto(m, self.osc_target)
+                except OSError:
+                    errors += 1
+        if self.verbose:
+            log.info("seq=%d valid=%d t=%.3f %s", seq, int(valid), r["sample_time"],
+                     "L=(%.3f,%.3f) R=(%.3f,%.3f) C=(%.3f,%.3f) lids=(%.2f,%.2f)" % vals if vals else "")
+        return valid, vals, errors
+
+    # -- thread
+
+    def _set(self, **kw):
+        with self._lock:
+            self._stats.update(kw)
+
+    def _run(self):
+        mm = None
+        last_seq = None
+        rate = 0.0
+        last_sample_t = None
+        while not self._stop.is_set():
+            if mm is None:
+                try:
+                    mm = open_mmap(self.mmap_path)
+                    last_seq = None
+                    self._set(state="idle", opens=self._stats["opens"] + 1)
+                    log.info("opened %s -> raw %s osc %s", self.mmap_path,
+                             ["%s:%d" % t for t in self.raw_targets], self.osc_target)
+                except OSError as e:
+                    if self._stats["state"] != "no-source":
+                        log.info("eye server not available (%s); retrying", e)
+                    self._set(state="no-source")
+                    self._stop.wait(REOPEN_SECONDS)
+                    continue
+            try:
+                seq = struct.unpack_from("<I", mm, SEQ_OFF)[0]
+            except ValueError:
+                mm = None
+                continue
+            now = time.monotonic()
+            if seq != last_seq:
+                if last_seq is not None:      # the very first read is the stale record from before we started
+                    valid, vals, errors = self.send_record(mm, seq)
+                    if last_sample_t is not None:
+                        dt = now - last_sample_t
+                        if dt > 0:
+                            rate = 1.0 / dt if dt > 1.0 else 0.9 * rate + 0.1 / dt
+                    last_sample_t = now
+                    with self._lock:
+                        st = self._stats
+                        st["samples"] += 1
+                        st["valid"] += int(valid)
+                        st["send_errors"] += errors
+                        st["rate"] = rate
+                        st["last_change"] = now
+                        st["valid_last"] = valid
+                        if vals is not None:
+                            st["values"] = vals
+                        if st["state"] != "streaming":
+                            st["state"] = "streaming"
+                            log.info("eye data streaming (seq %d)", seq)
+                last_seq = seq
+                self._set(seq=seq)
+            elif self._stats["state"] == "streaming" and last_sample_t is not None and now - last_sample_t > STALE_SECONDS:
+                self._set(state="idle", rate=0.0)
+                log.info("eye data idle (headset not worn or SteamVR in standby)")
+            self._stop.wait(self.poll_s)
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s",
+                        datefmt="%H:%M:%S", stream=sys.stdout)
+    if not args.raw and not args.target:
+        sys.exit("nothing to do: give --raw HOST:PORT and/or --target HOST:PORT")
+    try:
+        runtime = SenderRuntime(args)
+    except ValueError as e:
+        sys.exit(str(e))
+    if args.once:
+        try:
+            mm = open_mmap(args.mmap)
+        except OSError as e:
+            sys.exit("cannot open %s: %s" % (args.mmap, e))
+        runtime.verbose = True
+        seq = struct.unpack_from("<I", mm, SEQ_OFF)[0]
+        runtime.send_record(mm, seq)
+        return 0
+    runtime.start()
+    try:
+        last = 0.0
+        while True:
+            time.sleep(1.0)
+            if time.monotonic() - last > 60.0:
+                last = time.monotonic()
+                s = runtime.snapshot()
+                log.info("alive: state=%s samples=%d rate=%.1f/s seq=%s", s["state"], s["samples"], s["rate"], s["seq"])
+    except KeyboardInterrupt:
+        pass
+    finally:
+        runtime.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

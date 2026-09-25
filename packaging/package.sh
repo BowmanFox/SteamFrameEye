@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package the built module the way VRCFaceTracking expects it:
 #   SteamFrameEyeModule-<version>.zip  = module.json + SteamFrameEyeModule.dll (+ README, LICENSE)
-#   SteamFrameEye-headset-<version>.tar.gz = headset-side sender + systemd unit
+#   SteamFrameEye-headset-<version>.tar.gz = headset side: SteamVR overlay app (sender + dashboard), installer, unit
 #
 # VRCFT installs such a zip through "install local module" (InstallLocalModule: extracts, requires
 # module.json, moves the folder to %APPDATA%\VRCFaceTracking\CustomLibs\<ModuleId>\ and loads
@@ -47,7 +47,7 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
 PY
 fi
 
-tar czf "$OUT/$TGZ" -C "$ROOT/headset" frameeye_osc.py frameeye-osc.service
+tar czf "$OUT/$TGZ" -C "$ROOT/headset" --exclude=__pycache__ --exclude="*.pyc" --exclude="*.log" --exclude="*.lock" --exclude="frameeye.vrmanifest" .
 cp "$STAGE/module.json" "$OUT/module.json"
 echo "packaged:"; ls -la "$OUT"
 echo "module.json:"; cat "$OUT/module.json"

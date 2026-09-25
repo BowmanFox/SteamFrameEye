@@ -58,9 +58,23 @@ MIT for this module. The shared-memory layout and OSC conventions are from frame
 ## Repository layout
 
 - `SteamFrameEyeModule.cs` / `.csproj` — the VRCFT module (PC side).
-- `headset/frameeye_osc.py` — the headset-side sender (copy to `/home/steamos/frameeye/`).
-- `headset/frameeye-osc.service` — user systemd unit for it (`~/.config/systemd/user/`, then `XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable --now frameeye-osc`). Edit the `--raw` target to your PC's IP.
-- `tools/send_test_packets.py` — sends synthetic SFEY packets to `127.0.0.1:9021` to exercise the module without a headset.
+- `headset/` — the headset side, a **SteamVR overlay application** (standard-library Python):
+  - `frameeye_overlay.py` runs the sender in-process, registers itself with the Frame's SteamVR (`--install`), is auto-launched by SteamVR at startup and quits with it, and shows a dashboard tab with the live state (streaming / idle / no eye server, sample rate, targets, per-eye gaze and eyelids drawn as two eyes).
+  - `frameeye_osc.py` — the sender itself (`SenderRuntime`), also usable stand-alone from a shell or through the systemd unit `frameeye-osc.service`.
+  - `openvr_min.py` (ctypes binding to `libopenvr_api.so`) and `bitmap_font.py` are shared with the FCAM overlay in the Baballonia `steamframe/overlay` folder.
+  - `install-overlay.sh <pc-ip>[:port]` copies everything to `~/frameeye`, retires the systemd unit if enabled, writes `frameeye.vrmanifest` with the sender options, registers it (`appconfig.json` + `vrappconfig/ottlabs.steamframeeye.vrappconfig` and, if SteamVR runs, `AddApplicationManifest` + `SetApplicationAutoLaunch`) and starts it through SteamVR.
+  - `tools/gen_icon.py` regenerates `icon.png`.
+- `lib/vrcft-5.4.5/` — compile-time reference assemblies (see NOTICE.md), `packaging/` — release packaging, `tools/send_test_packets.py` — loopback test for the module.
+
+### Headset install (SteamVR overlay)
+
+```
+scp -r headset steamos@<headset-ip>:~/frameeye-src
+ssh steamos@<headset-ip> 'bash ~/frameeye-src/install-overlay.sh <pc-ip>:9021'
+ssh steamos@<headset-ip> 'python3 ~/frameeye/frameeye_overlay.py --status'
+```
+
+No root, `steamos-readonly` untouched. App key `ottlabs.steamframeeye`; `--uninstall` removes the registration and stops it. The tab appears in the SteamVR dashboard as "Steam Frame Eye". Log: `~/frameeye/frameeye_overlay.log`.
 
 ## Verified (2026-09-25)
 
