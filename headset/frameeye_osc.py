@@ -18,10 +18,12 @@ Copyright (c) 2026 konsti219): https://github.com/konsti219/frameeyeosc
 Dependency-free Python re-implementation so it runs on stock SteamOS.
 """
 import argparse
+import ctypes
 import logging
 import math
 import mmap
 import os
+import platform
 import socket
 import struct
 import sys
@@ -45,7 +47,8 @@ RAW_FMT = "<4sHHId3f3f3f2f3f3fd"
 RAW_VERSION = 1
 
 SCALE = 4.0 / math.pi
-DEFAULT_POLL_MS = 4.0
+DEFAULT_POLL_MS = 4.0         # fallback polling interval when the futex wait is unavailable
+FUTEX_TIMEOUT_S = 0.004       # wake at least every poll interval (also covers a producer that never FUTEX_WAKEs)
 STALE_SECONDS = 1.5           # no new sample for this long -> "idle" (headset not worn / standby)
 REOPEN_SECONDS = 2.0
 
@@ -121,15 +124,64 @@ def parse_hostport(s):
     return (host, int(port))
 
 
-def open_mmap(path):
-    fd = os.open(path, os.O_RDONLY)
+def open_mmap(path, writable=False):
+    """Maps the eye server object. The futex wait needs the address of the sequence word, which
+    ctypes only hands out for a writable mapping; nothing is ever written to it."""
+    fd = os.open(path, os.O_RDWR if writable else os.O_RDONLY)
     try:
         size = os.fstat(fd).st_size
         if size < EYE_DATA_OFF + EYE_DATA_LEN:
             raise OSError("unexpected mmap size %d" % size)
-        return mmap.mmap(fd, size, access=mmap.ACCESS_READ)
+        return mmap.mmap(fd, size, access=mmap.ACCESS_WRITE if writable else mmap.ACCESS_READ)
     finally:
         os.close(fd)
+
+
+# --- futex wait on the producer's sequence word (what the eye server signals on every sample) -------
+
+_SYS_FUTEX = {"aarch64": 98, "x86_64": 202}.get(platform.machine())
+_FUTEX_WAIT = 0
+_EAGAIN, _EINTR, _ETIMEDOUT = 11, 4, 110
+
+
+class _Timespec(ctypes.Structure):
+    _fields_ = [("tv_sec", ctypes.c_long), ("tv_nsec", ctypes.c_long)]
+
+
+class SeqWaiter:
+    """Blocks until the u32 at SEQ_OFF changes (FUTEX_WAIT with a timeout). Falls back to sleeping
+    when the syscall is not available or refuses the address."""
+
+    def __init__(self, mm, poll_s):
+        self.poll_s = poll_s
+        self.word = None
+        self.addr = None
+        self.libc = None
+        self.usable = False
+        if _SYS_FUTEX is not None and sys.platform.startswith("linux"):
+            try:
+                self.word = ctypes.c_uint32.from_buffer(mm, SEQ_OFF)   # keeps the mapping referenced
+                self.addr = ctypes.addressof(self.word)
+                self.libc = ctypes.CDLL(None, use_errno=True)
+                self.libc.syscall.restype = ctypes.c_long
+                self.usable = True
+            except (TypeError, ValueError, OSError):
+                self.usable = False
+
+    def wait(self, expected, timeout_s=FUTEX_TIMEOUT_S):
+        """Returns when the value differs from expected, on a wake-up, or after timeout_s."""
+        if not self.usable:
+            time.sleep(self.poll_s)
+            return
+        ts = _Timespec(int(timeout_s), int((timeout_s % 1.0) * 1e9))
+        r = self.libc.syscall(_SYS_FUTEX, ctypes.c_void_p(self.addr), ctypes.c_int(_FUTEX_WAIT),
+                              ctypes.c_uint32(expected), ctypes.byref(ts), None, ctypes.c_uint32(0))
+        if r == -1:
+            err = ctypes.get_errno()
+            if err not in (_EAGAIN, _EINTR, _ETIMEDOUT):
+                # unexpected (e.g. EFAULT/EINVAL on this mapping): stop using the futex path
+                self.usable = False
+                time.sleep(self.poll_s)
 
 
 def build_parser():
@@ -179,7 +231,7 @@ class SenderRuntime:
         self._thread = None
         self._lock = threading.Lock()
         self._stats = dict(state="no-source", seq=None, samples=0, valid=0, rate=0.0, last_change=None,
-                           values=None, valid_last=False, opens=0, send_errors=0, started=time.monotonic())
+                           values=None, valid_last=False, opens=0, send_errors=0, wait="-", started=time.monotonic())
 
     # -- lifecycle
 
@@ -235,16 +287,22 @@ class SenderRuntime:
 
     def _run(self):
         mm = None
+        waiter = None
         last_seq = None
         rate = 0.0
         last_sample_t = None
         while not self._stop.is_set():
             if mm is None:
                 try:
-                    mm = open_mmap(self.mmap_path)
+                    try:
+                        mm = open_mmap(self.mmap_path, writable=True)
+                    except OSError:
+                        mm = open_mmap(self.mmap_path)
+                    waiter = SeqWaiter(mm, self.poll_s)
                     last_seq = None
-                    self._set(state="idle", opens=self._stats["opens"] + 1)
-                    log.info("opened %s -> raw %s osc %s", self.mmap_path,
+                    self._set(state="idle", opens=self._stats["opens"] + 1, wait="futex" if waiter.usable else "poll")
+                    log.info("opened %s (%s wait) -> raw %s osc %s", self.mmap_path,
+                             "futex" if waiter.usable else "polling",
                              ["%s:%d" % t for t in self.raw_targets], self.osc_target)
                 except OSError as e:
                     if self._stats["state"] != "no-source":
@@ -284,7 +342,8 @@ class SenderRuntime:
             elif self._stats["state"] == "streaming" and last_sample_t is not None and now - last_sample_t > STALE_SECONDS:
                 self._set(state="idle", rate=0.0)
                 log.info("eye data idle (headset not worn or SteamVR in standby)")
-            self._stop.wait(self.poll_s)
+            if seq == last_seq:
+                waiter.wait(seq)
         try:
             self.sock.close()
         except OSError:

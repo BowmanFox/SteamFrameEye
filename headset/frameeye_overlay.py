@@ -51,7 +51,8 @@ LOCK = os.path.join(HERE, "frameeye_overlay.lock")
 
 PANEL_W, PANEL_H = 640, 400
 VR_RETRY_SECONDS = 5.0
-REDRAW_SECONDS = 0.2          # while the tab is visible (live eyes)
+REDRAW_SECONDS = 0.04         # while the tab is visible: 25 Hz, driven by new samples
+REDRAW_STATIC_SECONDS = 0.5   # while visible but no new sample (age counter, idle state)
 REDRAW_HIDDEN_SECONDS = 5.0   # while hidden, or after a failed upload (standby)
 EVENT_POLL_SECONDS = 0.05
 
@@ -104,25 +105,37 @@ class Panel:
             half = int(math.sqrt(max(0, r * r - dy * dy)))
             self.fill(rgba, cx - half, cy + dy, cx + half + 1, cy + dy + 1)
 
-    def text(self, x, y, string, rgba=TEXT, scale=1):
-        cell_w, cell_h = bitmap_font.CELL_W, bitmap_font.CELL_H
-        pixel = bytes(rgba)
+    _glyph_cache = {}
+
+    @classmethod
+    def glyph_rows_bytes(cls, ch, rgba, scale, bg):
+        """Pre-rendered rows (bytes) of one glyph with the background baked in; one slice copy per row."""
+        key = (ch, rgba, scale, bg)
+        rows = cls._glyph_cache.get(key)
+        if rows is None:
+            cell_w = bitmap_font.CELL_W
+            on, off = bytes(rgba), bytes(bg)
+            rows = []
+            for row in bitmap_font.glyph_rows(ch):
+                line = b"".join((on if row >> rx & 1 else off) * scale for rx in range(cell_w))
+                rows.extend([line] * scale)
+            cls._glyph_cache[key] = rows
+        return rows
+
+    def text(self, x, y, string, rgba=TEXT, scale=1, bg=PANEL):
+        cell_w = bitmap_font.CELL_W
         stride = self.width * 4
+        glyph_w = cell_w * scale * 4
         for index, ch in enumerate(string):
             gx = x + index * cell_w * scale
-            if gx >= self.width:
+            if gx + cell_w * scale > self.width:
                 break
-            for ry, row in enumerate(bitmap_font.glyph_rows(ch)):
-                if not row:
-                    continue
-                for rx in range(cell_w):
-                    if row >> rx & 1:
-                        px, py = gx + rx * scale, y + ry * scale
-                        for dy in range(scale):
-                            yy = py + dy
-                            if 0 <= yy < self.height:
-                                start = yy * stride + px * 4
-                                self.buf[start:start + 4 * scale] = pixel * scale
+            rows = self.glyph_rows_bytes(ch, rgba, scale, bg)
+            for ry, line in enumerate(rows):
+                yy = y + ry
+                if 0 <= yy < self.height:
+                    start = yy * stride + gx * 4
+                    self.buf[start:start + glyph_w] = line
 
     def text_width(self, string, scale=1):
         return len(string) * bitmap_font.CELL_W * scale
@@ -266,11 +279,12 @@ class OverlayApp:
 
     # -- drawing
 
-    def redraw(self):
+    def redraw(self, snapshot=None):
         """Draws the panel and uploads it. Returns True when the upload succeeded."""
         if self.session is None:
             return False
-        snapshot = self.runtime.snapshot()
+        if snapshot is None:
+            snapshot = self.runtime.snapshot()
         version = self.session.system.runtime_version()
         draw_panel(self.panel, snapshot, version)
         try:
@@ -311,6 +325,8 @@ class OverlayApp:
         log.info("Steam Frame Eye overlay starting (pid %d)", os.getpid())
         self.runtime.start()
         next_redraw = 0.0
+        next_static = 0.0
+        last_key = None
         try:
             while not self.stop.is_set():
                 if self.session is None:
@@ -323,13 +339,24 @@ class OverlayApp:
                     now = time.monotonic()
                     if now >= next_redraw:
                         visible = self.session.overlay.is_visible(self.main_handle)
-                        ok = self.redraw()
-                        next_redraw = now + (REDRAW_SECONDS if visible and ok else REDRAW_HIDDEN_SECONDS)
+                        if not visible:
+                            ok = self.redraw()
+                            next_redraw = now + REDRAW_HIDDEN_SECONDS
+                        else:
+                            snap = self.runtime.snapshot()
+                            key = (snap.get("seq"), snap.get("state"))
+                            if key != last_key or now >= next_static:
+                                last_key = key
+                                ok = self.redraw(snap)
+                                next_static = now + REDRAW_STATIC_SECONDS
+                                next_redraw = now + (REDRAW_SECONDS if ok else REDRAW_HIDDEN_SECONDS)
+                            else:
+                                next_redraw = now + 0.005
                 except ovr.OpenVRError as e:
                     log.warning("SteamVR call failed, reconnecting: %s", e)
                     self.disconnect_vr()
                     continue
-                self.stop.wait(EVENT_POLL_SECONDS)
+                self.stop.wait(min(EVENT_POLL_SECONDS, max(0.0, next_redraw - time.monotonic())))
         finally:
             self.disconnect_vr()
             self.runtime.stop()
@@ -578,6 +605,7 @@ def main(argv=None):
 
     signal.signal(signal.SIGINT, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
+    sys.setswitchinterval(0.001)  # renders must not hold the GIL away from the sender thread for long
     app.run()
     lock.close()
     return 0
