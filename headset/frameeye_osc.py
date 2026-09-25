@@ -222,6 +222,7 @@ class SenderRuntime:
             raise ValueError("--prefix must start with '/'")
         self.raw_targets = [parse_hostport(r) for r in args.raw if r and r != "none"]
         self.osc_target = parse_hostport(args.target) if args.target and args.target != "none" else None
+        self.enabled = True           # False: keep tracking state for display, send nothing
         self.prefix = args.prefix
         self.poll_s = max(0.001, args.poll_ms / 1000.0)
         self.mmap_path = args.mmap
@@ -253,7 +254,16 @@ class SenderRuntime:
         s["uptime"] = int(now - s["started"])
         s["raw_targets"] = ["%s:%d" % t for t in self.raw_targets]
         s["osc_target"] = "%s:%d" % self.osc_target if self.osc_target else None
+        s["enabled"] = self.enabled
         return s
+
+    def set_targets(self, raw=None, osc="keep"):
+        """Changes the destinations at runtime (strings HOST:PORT). osc=None disables direct OSC."""
+        if raw is not None:
+            self.raw_targets = [parse_hostport(r) for r in raw if r and r != "none"]
+        if osc != "keep":
+            self.osc_target = parse_hostport(osc) if osc and osc != "none" else None
+        log.info("targets now raw %s osc %s", ["%s:%d" % t for t in self.raw_targets], self.osc_target)
 
     # -- one sample
 
@@ -261,6 +271,8 @@ class SenderRuntime:
         r = parse_record(mm)
         valid = record_valid(r)
         errors = 0
+        if not self.enabled:
+            return valid, (derived_values(r) if valid else None), 0
         for target in self.raw_targets:
             try:
                 self.sock.sendto(build_raw(r, seq, valid), target)

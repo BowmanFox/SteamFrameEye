@@ -34,6 +34,15 @@ VREvent_DashboardDeactivated = 503
 VREvent_Quit = 700
 VREvent_ProcessQuit = 701
 VREvent_RestartRequested = 705
+VREvent_KeyboardClosed = 1200
+VREvent_KeyboardCharInput = 1201
+VREvent_KeyboardDone = 1202
+
+TextureType_OpenGL = 1
+ColorSpace_Auto = 0
+ColorSpace_Gamma = 1
+KeyboardFlag_Minimal = 1 << 0
+KeyboardFlag_Modal = 1 << 1
 
 VRInitError_None = 0
 VRInitError_Init_InstallationNotFound = 100
@@ -46,7 +55,7 @@ IVROverlay_Versions = ("IVROverlay_028", "IVROverlay_029", "IVROverlay_027", "IV
 IVRApplications_Versions = ("IVRApplications_008", "IVRApplications_007")
 
 IVRSystem_Count = 51
-IVROverlay_Count = 82
+IVROverlay_Count = 86
 IVRApplications_Count = 31
 
 LIBRARY_CANDIDATES = (
@@ -78,6 +87,15 @@ class VREvent_t(ctypes.Structure):
 
 class HmdVector2_t(ctypes.Structure):
     _fields_ = [("v", c_float * 2)]
+
+
+class Texture_t(ctypes.Structure):
+    """Texture_t: void *handle; ETextureType eType; EColorSpace eColorSpace."""
+    _fields_ = [("handle", c_void_p), ("eType", c_int), ("eColorSpace", c_int)]
+
+
+class VRTextureBounds_t(ctypes.Structure):
+    _fields_ = [("uMin", c_float), ("vMin", c_float), ("uMax", c_float), ("vMax", c_float)]
 
 
 assert ctypes.sizeof(VREvent_t) == 60
@@ -203,6 +221,14 @@ class Overlay:
         self._is_dashboard_visible = table.fn(68, c_bool)
         self._is_active_dashboard_overlay = table.fn(69, c_bool, c_uint64)
         self._show_dashboard = table.fn(72, None, c_char_p)
+        # additions for the Steam Frame Eye overlay (indices from openvr.h 2.15.6, IVROverlay_028)
+        self._set_sort_order = table.fn(20, c_int, c_uint64, c_uint32)
+        self._set_texture_bounds = table.fn(30, c_int, c_uint64, POINTER(VRTextureBounds_t))
+        self._set_texture = table.fn(60, c_int, c_uint64, POINTER(Texture_t))
+        self._clear_texture = table.fn(61, c_int, c_uint64)
+        self._show_keyboard = table.fn(75, c_int, c_uint64, c_int, c_int, c_uint32, c_char_p, c_uint32, c_char_p, c_uint64)
+        self._get_keyboard_text = table.fn(76, c_uint32, c_char_p, c_uint32)
+        self._hide_keyboard = table.fn(77, None)
 
     def error_name(self, code):
         value = self._error_name(code)
@@ -284,6 +310,36 @@ class Overlay:
 
     def show_dashboard(self, key):
         self._show_dashboard(key.encode())
+
+    def set_sort_order(self, handle, order):
+        self._check(self._set_sort_order(handle, order), "SetOverlaySortOrder")
+
+    def set_texture_bounds(self, handle, u_min, v_min, u_max, v_max):
+        bounds = VRTextureBounds_t(u_min, v_min, u_max, v_max)
+        self._check(self._set_texture_bounds(handle, byref(bounds)), "SetOverlayTextureBounds")
+
+    def set_gl_texture(self, handle, texture_id, color_space=ColorSpace_Gamma):
+        """SetOverlayTexture with an OpenGL texture of the calling thread's current EGL/GL context."""
+        texture = Texture_t(c_void_p(texture_id), TextureType_OpenGL, color_space)
+        self._check(self._set_texture(handle, byref(texture)), "SetOverlayTexture")
+
+    def clear_texture(self, handle):
+        self._clear_texture(handle)
+
+    def show_keyboard(self, handle, description, existing_text="", max_chars=128, user_value=0,
+                      flags=KeyboardFlag_Minimal | KeyboardFlag_Modal):
+        """Opens the SteamVR keyboard for this overlay (single line, normal input mode).
+        Result arrives as VREvent_KeyboardDone; read it with keyboard_text()."""
+        self._check(self._show_keyboard(handle, 0, 0, flags, description.encode(), max_chars,
+                                        existing_text.encode(), user_value), "ShowKeyboardForOverlay")
+
+    def keyboard_text(self):
+        buf = ctypes.create_string_buffer(512)
+        self._get_keyboard_text(buf, 512)
+        return buf.value.decode(errors="replace")
+
+    def hide_keyboard(self):
+        self._hide_keyboard()
 
 
 class Applications:

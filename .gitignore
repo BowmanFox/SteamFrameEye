@@ -3,3 +3,5 @@ obj/
 dist/
 __pycache__/
 *.pyc
+headset/frameeye.conf.json
+headset/frameeye.vrmanifest

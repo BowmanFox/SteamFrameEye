@@ -14,7 +14,7 @@ case "$TARGET" in *:*) ;; *) TARGET="$TARGET:9021" ;; esac
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/frameeye"
 mkdir -p "$DEST"
-for f in frameeye_osc.py frameeye_overlay.py frameeye_overlay.sh openvr_min.py bitmap_font.py icon.png; do
+for f in frameeye_osc.py frameeye_overlay.py frameeye_overlay.sh openvr_min.py bitmap_font.py gl_texture.py icon.png; do
   cp "$HERE/$f" "$DEST/$f"
 done
 chmod +x "$DEST/frameeye_overlay.py" "$DEST/frameeye_overlay.sh"

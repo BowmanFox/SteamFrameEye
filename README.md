@@ -59,7 +59,8 @@ MIT for this module. The shared-memory layout and OSC conventions are from frame
 
 - `SteamFrameEyeModule.cs` / `.csproj` — the VRCFT module (PC side).
 - `headset/` — the headset side, a **SteamVR overlay application** (standard-library Python):
-  - `frameeye_overlay.py` runs the sender in-process, registers itself with the Frame's SteamVR (`--install`), is auto-launched by SteamVR at startup and quits with it, and shows a dashboard tab with the live state (streaming / idle / no eye server, sample rate, targets, per-eye gaze and eyelids drawn as two eyes).
+  - `frameeye_overlay.py` runs the sender in-process, registers itself with the Frame's SteamVR (`--install`), is auto-launched by SteamVR at startup and quits with it, and shows a dashboard tab with the live state (streaming / idle / no eye server, sample rate, targets, per-eye gaze and eyelids drawn as two eyes) and three controls: **Sending ON/OFF**, **PC address** (typed on the SteamVR keyboard) and **VRChat ON/OFF** (direct OSC to `<pc>:9000` besides VRCFT). Settings persist in `~/frameeye/frameeye.conf.json` and take precedence over the manifest arguments.
+  - `gl_texture.py` — the panel is streamed into a persistent OpenGL ES texture (EGL surfaceless, Mesa zink on Turnip) and handed over with `SetOverlayTexture`; `SetOverlayRaw` recreates the compositor texture on every call, which flickers, so it is only a 2 Hz fallback (`--no-gl` forces it).
   - `frameeye_osc.py` — the sender itself (`SenderRuntime`), also usable stand-alone from a shell or through the systemd unit `frameeye-osc.service`.
   - `openvr_min.py` (ctypes binding to `libopenvr_api.so`) and `bitmap_font.py` are shared with the FCAM overlay in the Baballonia `steamframe/overlay` folder.
   - `install-overlay.sh <pc-ip>[:port]` copies everything to `~/frameeye`, retires the systemd unit if enabled, writes `frameeye.vrmanifest` with the sender options, registers it (`appconfig.json` + `vrappconfig/ottlabs.steamframeeye.vrappconfig` and, if SteamVR runs, `AddApplicationManifest` + `SetApplicationAutoLaunch`) and starts it through SteamVR.
@@ -76,7 +77,11 @@ ssh steamos@<headset-ip> 'python3 ~/frameeye/frameeye_overlay.py --status'
 
 No root, `steamos-readonly` untouched. App key `ottlabs.steamframeeye`; `--uninstall` removes the registration and stops it. The tab appears in the SteamVR dashboard as "Steam Frame Eye". Log: `~/frameeye/frameeye_overlay.log`.
 
-## Verified (2026-09-25)
+In the tab: **Sending: ON/OFF** pauses the UDP output (the eye state keeps updating), **PC address** opens the SteamVR keyboard for `host` or `host:port` (port defaults to 9021; the VRChat target follows the host), **VRChat: ON/OFF** additionally sends the `/FT/...` OSC parameters straight to `<pc>:9000`. All three are written to `~/frameeye/frameeye.conf.json` immediately and survive restarts; a later `--install --raw <pc>:port` overwrites the address in that file.
+
+## Verified (2026-09-25 / 26)
+
+Headset overlay v0.3.0: GL texture path active on the Frame (zink Vulkan 1.4 on Turnip Adreno 750, OpenGL ES 3.2, Mesa 26.3), no flicker, 25 Hz sample-driven refresh while the tab is visible, 0 % CPU with the tab hidden.
 
 VRCFaceTracking 5.4.5 (Steam build, .NET 10) loaded the module in its sandbox process, logged `Tracking initialized via SteamFrameEyeModule`, bound UDP 9021 and logged `first sample ... lids=(0.86,0.69)` from packets sent by the headset over Wi-Fi. Data only changes while the headset is worn.
 
@@ -87,6 +92,8 @@ VRCFaceTracking 5.4.5 (Steam build, .NET 10) loaded the module in its sandbox pr
 - **"another module already claimed eye tracking":** a second eye module (for example the Steam Link module) is installed and won the race. Uninstall it in VRCFT's module registry or move its folder out of `CustomLibs`.
 - **"no packets for 1.5 s":** headset asleep, not worn, sender stopped, or a firewall between headset and PC. Check with `python tools\send_test_packets.py` (loopback) and with `ss -u` / the service journal on the headset.
 - **Port clash:** 9015 is used by Steam Link's face-tracking OSC; this module defaults to 9021. Change it in `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.json`.
+- **Dashboard tab flickers or its footer says `raw`:** the GL texture path did not come up (log line `GL texture path unavailable`); the overlay then falls back to `SetOverlayRaw` at 2 Hz. Expected footer on the Frame: `GL`, log line `GL texture path: zink Vulkan ... Turnip`.
+- **Buttons in the tab do nothing:** the overlay only reacts to laser-pointer clicks on the bottom row; the log shows every change (`sending paused`, `PC address set to ...`, `direct VRChat OSC ...`).
 
 ## How VRCFaceTracking loads modules (5.4.x, from the decompiled binaries)
 

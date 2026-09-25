@@ -3,21 +3,26 @@
 frameeye_overlay.py - the Steam Frame eye sender as a SteamVR overlay application.
 
 Runs frameeye_osc.SenderRuntime in-process (eye server shared memory -> PC over UDP) and shows
-its state as a dashboard overlay: whether eye data is flowing, sample rate, the targets, and the
-live per-eye gaze and eyelid openness. SteamVR starts it at boot once it is registered with
---install (frameeye.vrmanifest + auto-launch) and asks it to quit at shutdown.
+its state as a dashboard tab: whether eye data is flowing, sample rate, the targets, the live
+per-eye gaze and eyelid openness, and three controls: Sending on/off, the PC address (edited with
+the SteamVR keyboard) and a VRChat-direct OSC toggle. Settings persist in frameeye.conf.json next
+to this script. SteamVR starts it at boot once it is registered with --install (frameeye.vrmanifest
++ auto-launch) and asks it to quit at shutdown.
+
+The panel is streamed through a persistent OpenGL texture (gl_texture.py, EGL surfaceless). The
+raw-pixel path (SetOverlayRaw) recreates the compositor texture on every call and flickers, so it
+is only a low-rate fallback.
 
 Standard library only. Follows the FCAM overlay of the Baballonia steamframe folder (same
 openvr_min binding and bitmap font).
 
-    frameeye_overlay.py --raw <pc>:9021 [...]     run (what SteamVR launches through frameeye_overlay.sh)
-    frameeye_overlay.py --install --raw <pc>:9021 write the manifest with these sender options,
-                                                  register with SteamVR, enable auto-launch, start it
+    frameeye_overlay.py [sender options]          run (what SteamVR launches through frameeye_overlay.sh)
+    frameeye_overlay.py --install --raw <pc>:9021 write manifest + config, register with SteamVR,
+                                                  enable auto-launch, start it
     frameeye_overlay.py --uninstall               remove the registration and stop
     frameeye_overlay.py --status                  show registration state
 """
 
-import argparse
 import json
 import logging
 import math
@@ -41,20 +46,32 @@ import bitmap_font  # noqa: E402
 import frameeye_osc  # noqa: E402
 import openvr_min as ovr  # noqa: E402
 
+try:
+    import gl_texture  # noqa: E402
+except Exception:  # pragma: no cover - platform without ctypes GL support
+    gl_texture = None
+
 APP_KEY = "ottlabs.steamframeeye"
 OVERLAY_KEY = "ottlabs.steamframeeye.dashboard"
 OVERLAY_NAME = "Steam Frame Eye"
 MANIFEST = os.path.join(HERE, "frameeye.vrmanifest")
+CONFIG = os.path.join(HERE, "frameeye.conf.json")
 ICON = os.path.join(HERE, "icon.png")
 DEFAULT_LOG = os.path.join(HERE, "frameeye_overlay.log")
 LOCK = os.path.join(HERE, "frameeye_overlay.lock")
 
-PANEL_W, PANEL_H = 640, 400
+PANEL_W, PANEL_H = 640, 480
+BUTTON_H = 56
 VR_RETRY_SECONDS = 5.0
-REDRAW_SECONDS = 0.04         # while the tab is visible: 25 Hz, driven by new samples
-REDRAW_STATIC_SECONDS = 0.5   # while visible but no new sample (age counter, idle state)
-REDRAW_HIDDEN_SECONDS = 5.0   # while hidden, or after a failed upload (standby)
+REDRAW_SECONDS = 0.04         # GL path, tab visible: up to 25 Hz, driven by new samples
+REDRAW_SECONDS_RAW = 0.5      # SetOverlayRaw fallback (each upload blanks a frame)
+REDRAW_STATIC_SECONDS = 0.5   # visible but nothing new: age counter, idle state
+REDRAW_HIDDEN_SECONDS = 5.0   # tab hidden, or after a failed upload (standby)
+VISIBLE_CHECK_SECONDS = 0.25
 EVENT_POLL_SECONDS = 0.05
+DEFAULT_RAW_PORT = 9021
+VRCHAT_OSC_PORT = 9000
+KEYBOARD_ADDRESS = 1          # user value of the address keyboard
 
 # RGBA colours
 BG = (24, 32, 44, 255)
@@ -65,6 +82,9 @@ ACCENT = (78, 160, 168, 255)
 OK = (96, 200, 120, 255)
 WARN = (240, 180, 70, 255)
 BAD = (230, 90, 90, 255)
+BUTTON = (60, 110, 120, 255)
+BUTTON_HOT = (90, 150, 160, 255)
+BUTTON_OFF = (70, 78, 92, 255)
 SCLERA = (236, 238, 240, 255)
 IRIS = (78, 160, 168, 255)
 PUPIL = (18, 22, 28, 255)
@@ -77,6 +97,8 @@ log = logging.getLogger("frameeye.overlay")
 
 class Panel:
     """An RGBA8 raster the size of the overlay, drawn with the generated bitmap font."""
+
+    _glyph_cache = {}
 
     def __init__(self, width, height):
         self.width, self.height = width, height
@@ -104,8 +126,6 @@ class Panel:
         for dy in range(-r, r + 1):
             half = int(math.sqrt(max(0, r * r - dy * dy)))
             self.fill(rgba, cx - half, cy + dy, cx + half + 1, cy + dy + 1)
-
-    _glyph_cache = {}
 
     @classmethod
     def glyph_rows_bytes(cls, ch, rgba, scale, bg):
@@ -152,34 +172,52 @@ def draw_eye(panel, cx, cy, r, gaze_x, gaze_y, openness, active):
         panel.disc(PUPIL, cx + ox, cy + oy, int(r * 0.22))
     closed = int((1.0 - max(0.0, min(1.0, openness))) * 2 * r)
     if closed > 0:
-        # lid: clip everything above the lid line back to the panel colour, keeping the disc outline
         for dy in range(-r, -r + closed):
             half = int(math.sqrt(max(0, r * r - dy * dy)))
             panel.fill(LID, cx - half, cy + dy, cx + half + 1, cy + dy + 1)
 
 
-def draw_panel(panel, snapshot, vr_version):
+# Buttons in the bottom band: (id, x0, x1)
+BUTTONS = (("sending", 16, 222), ("address", 230, 436), ("vrchat", 444, 624))
+BUTTON_Y0, BUTTON_Y1 = PANEL_H - 16 - BUTTON_H, PANEL_H - 16
+
+
+def button_at(x, y):
+    """Button id under a mouse position. Mouse y may be top-down or bottom-up depending on the
+    texture path, so the bottom band is accepted in both orientations; nothing interactive sits
+    opposite it."""
+    band = BUTTON_H + 16
+    if not (y >= PANEL_H - band or y <= band):
+        return None
+    for bid, x0, x1 in BUTTONS:
+        if x0 <= x <= x1:
+            return bid
+    return None
+
+
+def draw_panel(panel, snapshot, settings, hot, vr_version, texture_path):
     panel.fill(BG)
-    panel.fill(PANEL, 16, 16, PANEL_W - 16, PANEL_H - 16)
+    panel.fill(PANEL, 16, 16, PANEL_W - 16, BUTTON_Y0 - 12)
 
     panel.text(32, 28, "Steam Frame Eye", ACCENT, scale=2)
     state = snapshot.get("state", "?")
-    if state == "streaming":
-        state_text, state_color = "eye data streaming, %.0f Hz" % snapshot.get("rate", 0.0), OK
+    rate = snapshot.get("rate", 0.0)
+    if state == "streaming" and not settings.enabled:
+        state_text, state_color = "sending paused (eye data %.0f Hz)" % rate, WARN
+    elif state == "streaming":
+        state_text, state_color = "eye data streaming, %.0f Hz" % rate, OK
     elif state == "idle":
         state_text, state_color = "eye server idle (headset off / standby)", WARN
     else:
         state_text, state_color = "waiting for the eye tracking server", BAD
     panel.text(32, 90, state_text, state_color)
 
-    targets = snapshot.get("raw_targets") or []
-    osc = snapshot.get("osc_target")
     values = snapshot.get("values")
     age = snapshot.get("age")
     rows = [
-        ("vrcft", ", ".join(targets) or "no --raw target"),
-        ("vrchat", osc or "off (VRCFT sends the parameters)"),
-        ("samples", "%d sent, %d valid, %d send errors" % (snapshot.get("samples", 0), snapshot.get("valid", 0),
+        ("vrcft", ", ".join(settings.raw) or "no PC address set"),
+        ("vrchat", settings.target or "off (VRCFT sends the parameters)"),
+        ("samples", "%d read, %d valid, %d send errors" % (snapshot.get("samples", 0), snapshot.get("valid", 0),
                                                            snapshot.get("send_errors", 0))),
         ("last", "%.1f s ago (seq %s)" % (age, snapshot.get("seq")) if age is not None else "none yet"),
     ]
@@ -196,14 +234,85 @@ def draw_panel(panel, snapshot, vr_version):
     active = state == "streaming" and values is not None
     lx, ly, rx, ry = (values[0], values[1], values[2], values[3]) if values else (0, 0, 0, 0)
     lid_l, lid_r = (values[6], values[7]) if values else (1.0, 1.0)
-    # the panel is what the wearer sees: their left eye on the left (bottom right corner, below the rows)
-    eye_y, eye_r = PANEL_H - 16 - 58, 40
-    draw_eye(panel, 470, eye_y, eye_r, lx, ly, lid_l, active)
-    draw_eye(panel, 572, eye_y, eye_r, rx, ry, lid_r, active)
-    panel.text(470 - 6 - eye_r - 14, eye_y - bitmap_font.CELL_H // 2, "L", DIM)
-    panel.text(572 + eye_r + 8, eye_y - bitmap_font.CELL_H // 2, "R", DIM)
+    eye_y, eye_r = 348, 40
+    draw_eye(panel, 462, eye_y, eye_r, lx, ly, lid_l, active)      # wearer's left eye on the left
+    draw_eye(panel, 564, eye_y, eye_r, rx, ry, lid_r, active)
+    panel.text(462 - eye_r - 20, eye_y - bitmap_font.CELL_H // 2, "L", DIM)
+    panel.text(564 + eye_r + 8, eye_y - bitmap_font.CELL_H // 2, "R", DIM)
 
-    panel.text(32, PANEL_H - 16 - 30, "SteamVR %s" % (vr_version or "?"), DIM)
+    panel.text(32, BUTTON_Y0 - 12 - 30, "SteamVR %s  %s" % (vr_version or "?", texture_path), DIM)
+
+    labels = {
+        "sending": "Sending: %s" % ("ON" if settings.enabled else "OFF"),
+        "address": "PC address",
+        "vrchat": "VRChat: %s" % ("ON" if settings.target else "OFF"),
+    }
+    for bid, x0, x1 in BUTTONS:
+        on = (bid == "sending" and settings.enabled) or (bid == "vrchat" and settings.target) or bid == "address"
+        color = BUTTON_HOT if hot == bid else (BUTTON if on else BUTTON_OFF)
+        panel.fill(color, x0, BUTTON_Y0, x1, BUTTON_Y1)
+        panel.outline(ACCENT, x0, BUTTON_Y0, x1, BUTTON_Y1)
+        label = labels[bid]
+        panel.text(x0 + (x1 - x0 - panel.text_width(label)) // 2, BUTTON_Y0 + (BUTTON_H - bitmap_font.CELL_H) // 2,
+                   label, TEXT, bg=color)
+
+
+# ----------------------------------------------------------------------------- settings
+
+class Settings:
+    """raw targets, direct VRChat target and the sending switch; persisted in frameeye.conf.json."""
+
+    def __init__(self, args):
+        self.raw = [r for r in args.raw if r and r != "none"]
+        self.target = args.target if args.target and args.target != "none" else None
+        self.enabled = True
+        cfg = load_config()
+        if isinstance(cfg.get("raw"), list):
+            self.raw = [str(r) for r in cfg["raw"]]
+        if "target" in cfg:
+            self.target = cfg["target"] or None
+        if "enabled" in cfg:
+            self.enabled = bool(cfg["enabled"])
+
+    def save(self):
+        save_config({"raw": self.raw, "target": self.target, "enabled": self.enabled})
+
+    def apply(self, runtime):
+        runtime.set_targets(raw=self.raw, osc=self.target)
+        runtime.enabled = self.enabled
+
+    def pc_host(self):
+        return self.raw[0].rsplit(":", 1)[0] if self.raw else None
+
+
+def load_config():
+    try:
+        with open(CONFIG, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_config(data):
+    tmp = CONFIG + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, CONFIG)
+
+
+def normalize_address(text, default_port):
+    """'host', 'host:port' -> 'host:port' or None when unusable."""
+    text = text.strip()
+    if not text or " " in text:
+        return None
+    if ":" in text:
+        host, _, port = text.rpartition(":")
+        if not host or not port.isdigit() or not 0 < int(port) < 65536:
+            return None
+        return "%s:%d" % (host, int(port))
+    return "%s:%d" % (text, default_port)
 
 
 # ----------------------------------------------------------------------------- overlay app
@@ -211,16 +320,23 @@ def draw_panel(panel, snapshot, vr_version):
 class OverlayApp:
     def __init__(self, args):
         self.args = args
+        self.settings = Settings(args)
         self.runtime = frameeye_osc.SenderRuntime(args)
+        self.settings.apply(self.runtime)
         self.session = None
         self.main_handle = None
         self.thumb_handle = None
+        self.gl = None
         self.panel = Panel(PANEL_W, PANEL_H)
         self.stop = threading.Event()
+        self.hot = None
         self.last_vr_attempt = 0.0
         self.vr_error_logged = None
         self.upload_failures = 0
         self.upload_failed_since = None
+        self.visible = False
+        self.visible_checked = 0.0
+        self.dirty = True
 
     # -- SteamVR connection
 
@@ -245,6 +361,8 @@ class OverlayApp:
                 overlay.destroy_overlay(existing)
             main, thumb = overlay.create_dashboard_overlay(OVERLAY_KEY, OVERLAY_NAME)
             overlay.set_width_meters(main, 1.5)
+            overlay.set_input_method(main, ovr.VROverlayInputMethod_Mouse)
+            overlay.set_mouse_scale(main, PANEL_W, PANEL_H)
             if os.path.exists(ICON):
                 try:
                     overlay.set_from_file(thumb, ICON)
@@ -262,6 +380,16 @@ class OverlayApp:
         self.main_handle, self.thumb_handle = main, thumb
         log.info("SteamVR connected (%s, %s, %s, runtime %s, %s)", session.system.version, session.overlay.version,
                  session.applications.version, session.system.runtime_version(), session.library_path)
+        self.gl = None
+        if gl_texture is not None and not self.args.no_gl:
+            try:
+                self.gl = gl_texture.GlTexture(PANEL_W, PANEL_H)
+                log.info("GL texture path: %s", self.gl.info)
+            except Exception as e:  # GlError, OSError (missing libs)
+                log.warning("GL texture path unavailable (%s); falling back to SetOverlayRaw at %.1f Hz",
+                            e, 1.0 / REDRAW_SECONDS_RAW)
+                self.gl = None
+        self.dirty = True
         self.redraw()
         return True
 
@@ -270,9 +398,14 @@ class OverlayApp:
             return
         try:
             if self.main_handle:
+                if self.gl is not None:
+                    self.session.overlay.clear_texture(self.main_handle)
                 self.session.overlay.destroy_overlay(self.main_handle)
         except ovr.OpenVRError:
             pass
+        if self.gl is not None:
+            self.gl.close()
+            self.gl = None
         self.session.shutdown()
         self.session = None
         self.main_handle = self.thumb_handle = None
@@ -280,16 +413,20 @@ class OverlayApp:
     # -- drawing
 
     def redraw(self, snapshot=None):
-        """Draws the panel and uploads it. Returns True when the upload succeeded."""
+        """Draws the panel and hands it to the compositor. Returns True when that succeeded."""
         if self.session is None:
             return False
         if snapshot is None:
             snapshot = self.runtime.snapshot()
         version = self.session.system.runtime_version()
-        draw_panel(self.panel, snapshot, version)
+        draw_panel(self.panel, snapshot, self.settings, self.hot, version, "GL" if self.gl else "raw")
         try:
-            self.session.overlay.set_raw(self.main_handle, self.panel.buf, PANEL_W, PANEL_H)
-        except ovr.OpenVRError as e:
+            if self.gl is not None:
+                self.gl.upload(self.panel.buf)
+                self.session.overlay.set_gl_texture(self.main_handle, self.gl.texture)
+            else:
+                self.session.overlay.set_raw(self.main_handle, self.panel.buf, PANEL_W, PANEL_H)
+        except Exception as e:  # OpenVRError, GlError
             # Happens while the compositor is suspended (headset in standby); log once per episode.
             self.upload_failures += 1
             if self.upload_failed_since is None:
@@ -300,7 +437,59 @@ class OverlayApp:
             log.info("overlay uploads work again after %.0f s (%d failed)",
                      time.monotonic() - self.upload_failed_since, self.upload_failures)
             self.upload_failed_since = None
+        self.dirty = False
         return True
+
+    # -- controls
+
+    def toggle_sending(self):
+        self.settings.enabled = not self.settings.enabled
+        self.runtime.enabled = self.settings.enabled
+        self.settings.save()
+        log.info("sending %s", "enabled" if self.settings.enabled else "paused")
+
+    def toggle_vrchat(self):
+        if self.settings.target:
+            self.settings.target = None
+        else:
+            host = self.settings.pc_host()
+            if not host:
+                log.warning("set a PC address first")
+                return
+            self.settings.target = "%s:%d" % (host, VRCHAT_OSC_PORT)
+        self.settings.apply(self.runtime)
+        self.settings.save()
+        log.info("direct VRChat OSC %s", self.settings.target or "off")
+
+    def edit_address(self):
+        try:
+            self.session.overlay.show_keyboard(self.main_handle, "PC address for VRCFT (host or host:port)",
+                                               existing_text=self.settings.raw[0] if self.settings.raw else "",
+                                               max_chars=64, user_value=KEYBOARD_ADDRESS)
+        except ovr.OpenVRError as e:
+            log.warning("keyboard: %s", e)
+
+    def keyboard_done(self):
+        text = self.session.overlay.keyboard_text()
+        address = normalize_address(text, DEFAULT_RAW_PORT)
+        if not address:
+            log.warning("ignored PC address %r", text)
+            return
+        self.settings.raw = [address]
+        if self.settings.target:
+            self.settings.target = "%s:%d" % (address.rsplit(":", 1)[0], VRCHAT_OSC_PORT)
+        self.settings.apply(self.runtime)
+        self.settings.save()
+        log.info("PC address set to %s", address)
+
+    def handle_button(self, bid):
+        if bid == "sending":
+            self.toggle_sending()
+        elif bid == "vrchat":
+            self.toggle_vrchat()
+        elif bid == "address":
+            self.edit_address()
+        self.dirty = True
 
     def handle_events(self):
         """Returns False when SteamVR asked us to quit."""
@@ -315,14 +504,44 @@ class OverlayApp:
                 log.info("SteamVR requested quit")
                 session.system.acknowledge_quit_exiting()
                 return False
-        while session.overlay.poll_next_overlay_event(self.main_handle) is not None:
-            pass  # no interactive elements on this panel
+            if event.eventType == ovr.VREvent_KeyboardDone:
+                self.keyboard_done()
+                self.dirty = True
+        while True:
+            event = session.overlay.poll_next_overlay_event(self.main_handle)
+            if event is None:
+                break
+            et = event.eventType
+            if et == ovr.VREvent_MouseMove:
+                x, y, _ = event.mouse()
+                hot = button_at(x, y)
+                if hot != self.hot:
+                    self.hot = hot
+                    self.dirty = True
+            elif et == ovr.VREvent_MouseButtonDown:
+                x, y, _ = event.mouse()
+                bid = button_at(x, y)
+                if bid:
+                    self.handle_button(bid)
+            elif et == ovr.VREvent_KeyboardDone:
+                self.keyboard_done()
+                self.dirty = True
+            elif et == ovr.VREvent_OverlayHidden:
+                self.hot = None
+                self.dirty = True
         return True
+
+    def is_visible(self, now):
+        if now - self.visible_checked >= VISIBLE_CHECK_SECONDS:
+            self.visible = self.session.overlay.is_visible(self.main_handle)
+            self.visible_checked = now
+        return self.visible
 
     # -- main loop
 
     def run(self):
-        log.info("Steam Frame Eye overlay starting (pid %d)", os.getpid())
+        log.info("Steam Frame Eye overlay starting (pid %d), targets raw %s vrchat %s, sending %s",
+                 os.getpid(), self.settings.raw, self.settings.target, "on" if self.settings.enabled else "paused")
         self.runtime.start()
         next_redraw = 0.0
         next_static = 0.0
@@ -333,30 +552,31 @@ class OverlayApp:
                     self.connect_vr()
                     self.stop.wait(0.5 if self.session is None else 0)
                     continue
+                sleep = EVENT_POLL_SECONDS
                 try:
                     if not self.handle_events():
                         break
                     now = time.monotonic()
-                    if now >= next_redraw:
-                        visible = self.session.overlay.is_visible(self.main_handle)
-                        if not visible:
-                            ok = self.redraw()
+                    if not self.is_visible(now):
+                        if now >= next_redraw:
+                            self.redraw()
                             next_redraw = now + REDRAW_HIDDEN_SECONDS
-                        else:
-                            snap = self.runtime.snapshot()
-                            key = (snap.get("seq"), snap.get("state"))
-                            if key != last_key or now >= next_static:
-                                last_key = key
-                                ok = self.redraw(snap)
-                                next_static = now + REDRAW_STATIC_SECONDS
-                                next_redraw = now + (REDRAW_SECONDS if ok else REDRAW_HIDDEN_SECONDS)
-                            else:
-                                next_redraw = now + 0.005
+                        sleep = min(EVENT_POLL_SECONDS, max(0.01, next_redraw - now))
+                    else:
+                        snap = self.runtime.snapshot()
+                        key = (snap.get("seq"), snap.get("state"))
+                        interval = REDRAW_SECONDS if self.gl is not None else REDRAW_SECONDS_RAW
+                        if ((key != last_key or self.dirty) and now >= next_redraw) or now >= next_static:
+                            last_key = key
+                            ok = self.redraw(snap)
+                            next_static = now + REDRAW_STATIC_SECONDS
+                            next_redraw = now + (interval if ok else REDRAW_HIDDEN_SECONDS)
+                        sleep = 0.008
                 except ovr.OpenVRError as e:
                     log.warning("SteamVR call failed, reconnecting: %s", e)
                     self.disconnect_vr()
                     continue
-                self.stop.wait(min(EVENT_POLL_SECONDS, max(0.0, next_redraw - time.monotonic())))
+                self.stop.wait(sleep)
         finally:
             self.disconnect_vr()
             self.runtime.stop()
@@ -516,7 +736,8 @@ def register_live(enable, launch, library, run_args):
 
 def status(library):
     cfg = config_dir()
-    lines = ["manifest: %s" % MANIFEST, "config dir: %s" % cfg, "running instance (lock): pid %d" % running_pid()]
+    lines = ["manifest: %s" % MANIFEST, "config: %s -> %s" % (CONFIG, json.dumps(load_config())),
+             "config dir: %s" % cfg, "running instance (lock): pid %d" % running_pid()]
     try:
         with open(MANIFEST, encoding="utf-8") as fh:
             lines.append("manifest arguments: %s" % json.load(fh)["applications"][0].get("arguments", ""))
@@ -553,11 +774,12 @@ def main(argv=None):
     parser = frameeye_osc.build_parser()
     parser.description = "Steam Frame eye sender as a SteamVR overlay."
     parser.add_argument("--install", action="store_true",
-                        help="write the manifest with the given sender options, register with SteamVR, "
+                        help="write manifest + config with the given sender options, register with SteamVR, "
                              "enable auto-launch and start")
     parser.add_argument("--uninstall", action="store_true", help="remove the SteamVR registration and stop")
     parser.add_argument("--status", action="store_true", help="print registration state and exit")
     parser.add_argument("--no-launch", action="store_true", help="with --install: do not start the overlay now")
+    parser.add_argument("--no-gl", action="store_true", help="force the SetOverlayRaw path (debugging)")
     parser.add_argument("--openvr-lib", default=None, help="path to libopenvr_api.so (auto-detected)")
     parser.add_argument("--log-file", default=DEFAULT_LOG, help="log file (default: next to this script)")
     args = parser.parse_args(argv)
@@ -577,16 +799,21 @@ def main(argv=None):
     if args.install or args.uninstall:
         enable = bool(args.install)
         if enable:
-            if not args.raw and not args.target:
-                parser.error("--install needs the sender options to record, e.g. --raw <pc-ip>:9021")
-            print("wrote %s (arguments: %s)" % (write_manifest(run_args), " ".join(run_args)))
+            cfg = load_config()
+            if args.raw:
+                cfg["raw"] = [r for r in args.raw if r and r != "none"]
+            if args.target:
+                cfg["target"] = None if args.target == "none" else args.target
+            if not cfg.get("raw") and not cfg.get("target"):
+                parser.error("--install needs a PC address to record, e.g. --raw <pc-ip>:9021")
+            cfg.setdefault("enabled", True)
+            save_config(cfg)
+            print("wrote %s (%s) and %s" % (write_manifest(run_args), " ".join(run_args) or "no arguments", CONFIG))
         appconfig, appcfg = register_files(enable)
         print("%s %s and %s" % ("updated" if enable else "cleaned", appconfig, appcfg))
         print(register_live(enable, launch=not args.no_launch, library=args.openvr_lib, run_args=run_args))
         return 0
 
-    if not args.raw and not args.target:
-        parser.error("give --raw <pc-ip>:9021 and/or --target <pc-ip>:9000")
     lock = acquire_lock()
     if lock is None:
         log.info("another Steam Frame Eye overlay instance is running (pid %d); exiting", running_pid())
@@ -598,6 +825,8 @@ def main(argv=None):
         log.error("%s", e)
         lock.close()
         return 1
+    if not app.settings.raw and not app.settings.target:
+        log.warning("no PC address configured yet; set it in the dashboard tab (PC address button)")
 
     def request_stop(signum, _frame):
         log.info("signal %d, stopping", signum)
