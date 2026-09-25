@@ -29,6 +29,8 @@ VREvent_MouseButtonDown = 301
 VREvent_MouseButtonUp = 302
 VREvent_OverlayShown = 500
 VREvent_OverlayHidden = 501
+VREvent_FocusEnter = 302
+VREvent_FocusLeave = 303
 VREvent_DashboardActivated = 502
 VREvent_DashboardDeactivated = 503
 VREvent_Quit = 700
@@ -83,6 +85,11 @@ class VREvent_t(ctypes.Structure):
     def mouse(self):
         """(x, y, button) of a VREvent_Mouse_t payload."""
         return struct.unpack_from("<ffI", bytes(self.data))
+
+    def keyboard(self):
+        """(new_input, user_value) of a VREvent_Keyboard_t payload (char cNewInput[8]; uint64 uUserValue)."""
+        raw = bytes(self.data)
+        return raw[:8].split(b"\0", 1)[0].decode(errors="replace"), struct.unpack_from("<Q", raw, 8)[0]
 
 
 class HmdVector2_t(ctypes.Structure):
@@ -327,9 +334,11 @@ class Overlay:
         self._clear_texture(handle)
 
     def show_keyboard(self, handle, description, existing_text="", max_chars=128, user_value=0,
-                      flags=KeyboardFlag_Minimal | KeyboardFlag_Modal):
-        """Opens the SteamVR keyboard for this overlay (single line, normal input mode).
-        Result arrives as VREvent_KeyboardDone; read it with keyboard_text()."""
+                      flags=KeyboardFlag_Modal):
+        """Opens the SteamVR keyboard for this overlay (single line, normal input mode). Without
+        KeyboardFlag_Minimal the keyboard buffers the text in its own input line (pre-filled with
+        existing_text) and the result is read with keyboard_text() on VREvent_KeyboardDone; with
+        Minimal it sends VREvent_KeyboardCharInput per key instead and keeps no buffer."""
         self._check(self._show_keyboard(handle, 0, 0, flags, description.encode(), max_chars,
                                         existing_text.encode(), user_value), "ShowKeyboardForOverlay")
 

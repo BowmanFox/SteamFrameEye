@@ -3,11 +3,11 @@
 frameeye_overlay.py - the Steam Frame eye sender as a SteamVR overlay application.
 
 Runs frameeye_osc.SenderRuntime in-process (eye server shared memory -> PC over UDP) and shows
-its state as a dashboard tab: whether eye data is flowing, sample rate, the targets, the live
-per-eye gaze and eyelid openness, and three controls: Sending on/off, the PC address (edited with
-the SteamVR keyboard) and a VRChat-direct OSC toggle. Settings persist in frameeye.conf.json next
-to this script. SteamVR starts it at boot once it is registered with --install (frameeye.vrmanifest
-+ auto-launch) and asks it to quit at shutdown.
+its state as a dashboard tab: whether eye data is flowing, sample rate, the live per-eye gaze and
+eyelid openness, and a small settings form: Sending on/off, the PC address (a text field edited
+with the SteamVR keyboard) and a switch for direct OSC to VRChat on the PC. Settings persist in
+frameeye.conf.json next to this script. SteamVR starts it at boot once it is registered with
+--install (frameeye.vrmanifest + auto-launch) and asks it to quit at shutdown.
 
 The panel is streamed through a persistent OpenGL texture (gl_texture.py, EGL surfaceless). The
 raw-pixel path (SetOverlayRaw) recreates the compositor texture on every call and flickers, so it
@@ -60,8 +60,7 @@ ICON = os.path.join(HERE, "icon.png")
 DEFAULT_LOG = os.path.join(HERE, "frameeye_overlay.log")
 LOCK = os.path.join(HERE, "frameeye_overlay.lock")
 
-PANEL_W, PANEL_H = 640, 480
-BUTTON_H = 56
+PANEL_W, PANEL_H = 640, 568
 VR_RETRY_SECONDS = 5.0
 REDRAW_SECONDS = 0.04         # GL path, tab visible: up to 25 Hz, driven by new samples
 REDRAW_SECONDS_RAW = 0.5      # SetOverlayRaw fallback (each upload blanks a frame)
@@ -76,6 +75,7 @@ KEYBOARD_ADDRESS = 1          # user value of the address keyboard
 # RGBA colours
 BG = (24, 32, 44, 255)
 PANEL = (34, 44, 58, 255)
+FIELD = (18, 24, 34, 255)
 TEXT = (230, 236, 240, 255)
 DIM = (150, 160, 170, 255)
 ACCENT = (78, 160, 168, 255)
@@ -177,33 +177,64 @@ def draw_eye(panel, cx, cy, r, gaze_x, gaze_y, openness, active):
             panel.fill(LID, cx - half, cy + dy, cx + half + 1, cy + dy + 1)
 
 
-# Buttons in the bottom band: (id, x0, x1)
-BUTTONS = (("sending", 16, 222), ("address", 230, 436), ("vrchat", 444, 624))
-BUTTON_Y0, BUTTON_Y1 = PANEL_H - 16 - BUTTON_H, PANEL_H - 16
+# ----------------------------------------------------------------------------- layout
+
+CELL_W, CELL_H = bitmap_font.CELL_W, bitmap_font.CELL_H
+STATUS_CARD = (16, 16, PANEL_W - 16, 352)
+SETTINGS_CARD = (16, 364, PANEL_W - 16, PANEL_H - 16)
+ROW_SENDING = (32, 376, 608, 428)      # whole row is clickable
+ROW_ADDRESS = (32, 436, 608, 480)
+ROW_VRCHAT = (32, 488, 608, 540)
+TOGGLE_X0, TOGGLE_X1 = 496, 608
+FIELD_X0, FIELD_X1 = 200, 608
+CAPTION_CHARS = (TOGGLE_X0 - 8 - 32) // CELL_W
+CONTROLS = (("sending", ROW_SENDING), ("address", ROW_ADDRESS), ("vrchat", ROW_VRCHAT))
 
 
-def button_at(x, y):
-    """Button id under a mouse position. Mouse y may be top-down or bottom-up depending on the
-    texture path, so the bottom band is accepted in both orientations; nothing interactive sits
-    opposite it."""
-    band = BUTTON_H + 16
-    if not (y >= PANEL_H - band or y <= band):
-        return None
-    for bid, x0, x1 in BUTTONS:
-        if x0 <= x <= x1:
-            return bid
+def control_at(x, y):
+    """Control id under a panel position (top-down pixel coordinates)."""
+    for cid, (x0, y0, x1, y1) in CONTROLS:
+        if x0 <= x < x1 and y0 <= y < y1:
+            return cid
     return None
 
 
-def draw_panel(panel, snapshot, settings, hot, vr_version, texture_path):
-    panel.fill(BG)
-    panel.fill(PANEL, 16, 16, PANEL_W - 16, BUTTON_Y0 - 12)
+def draw_toggle(panel, x0, y0, x1, y1, on, hot):
+    color = BUTTON_HOT if hot else (BUTTON if on else BUTTON_OFF)
+    panel.fill(color, x0, y0, x1, y1)
+    panel.outline(ACCENT if (on or hot) else DIM, x0, y0, x1, y1)
+    label = "ON" if on else "OFF"
+    panel.text(x0 + (x1 - x0 - panel.text_width(label)) // 2, y0 + (y1 - y0 - CELL_H) // 2, label, TEXT, bg=color)
 
+
+def draw_field(panel, x0, y0, x1, y1, value, hot, editing):
+    panel.fill(FIELD, x0, y0, x1, y1)
+    panel.outline(WARN if editing else ACCENT if hot else DIM, x0, y0, x1, y1)
+    ty = y0 + (y1 - y0 - CELL_H) // 2
+    hint = "typing" if editing else "edit"
+    hint_x = x1 - 12 - panel.text_width(hint)
+    max_chars = (hint_x - 8 - (x0 + 12)) // CELL_W
+    if editing:
+        shown = (value + "_")[-max_chars:]
+        panel.text(x0 + 12, ty, shown, TEXT, bg=FIELD)
+    elif value:
+        panel.text(x0 + 12, ty, value[:max_chars], TEXT, bg=FIELD)
+    else:
+        panel.text(x0 + 12, ty, "not set - click to enter"[:max_chars], DIM, bg=FIELD)
+    panel.text(hint_x, ty, hint, WARN if editing else TEXT if hot else DIM, bg=FIELD)
+
+
+def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture_path):
+    panel.fill(BG)
+    panel.fill(PANEL, *STATUS_CARD)
+    panel.fill(PANEL, *SETTINGS_CARD)
+
+    # -- status card
     panel.text(32, 28, "Steam Frame Eye", ACCENT, scale=2)
     state = snapshot.get("state", "?")
     rate = snapshot.get("rate", 0.0)
     if state == "streaming" and not settings.enabled:
-        state_text, state_color = "sending paused (eye data %.0f Hz)" % rate, WARN
+        state_text, state_color = "eye data %.0f Hz, sending paused" % rate, WARN
     elif state == "streaming":
         state_text, state_color = "eye data streaming, %.0f Hz" % rate, OK
     elif state == "idle":
@@ -215,8 +246,6 @@ def draw_panel(panel, snapshot, settings, hot, vr_version, texture_path):
     values = snapshot.get("values")
     age = snapshot.get("age")
     rows = [
-        ("vrcft", ", ".join(settings.raw) or "no PC address set"),
-        ("vrchat", settings.target or "off (VRCFT sends the parameters)"),
         ("samples", "%d read, %d valid, %d send errors" % (snapshot.get("samples", 0), snapshot.get("valid", 0),
                                                            snapshot.get("send_errors", 0))),
         ("last", "%.1f s ago (seq %s)" % (age, snapshot.get("seq")) if age is not None else "none yet"),
@@ -228,33 +257,43 @@ def draw_panel(panel, snapshot, settings, hot, vr_version, texture_path):
     y = 130
     for label, value in rows:
         panel.text(32, y, label.rjust(8), DIM)
-        panel.text(32 + 9 * bitmap_font.CELL_W, y, value[:44], TEXT)
-        y += bitmap_font.CELL_H + 6
+        panel.text(32 + 9 * CELL_W, y, value[:44], TEXT)
+        y += CELL_H + 6
 
     active = state == "streaming" and values is not None
     lx, ly, rx, ry = (values[0], values[1], values[2], values[3]) if values else (0, 0, 0, 0)
     lid_l, lid_r = (values[6], values[7]) if values else (1.0, 1.0)
-    eye_y, eye_r = 348, 40
+    eye_y, eye_r = 292, 40
     draw_eye(panel, 462, eye_y, eye_r, lx, ly, lid_l, active)      # wearer's left eye on the left
     draw_eye(panel, 564, eye_y, eye_r, rx, ry, lid_r, active)
-    panel.text(462 - eye_r - 20, eye_y - bitmap_font.CELL_H // 2, "L", DIM)
-    panel.text(564 + eye_r + 8, eye_y - bitmap_font.CELL_H // 2, "R", DIM)
+    panel.text(462 - eye_r - 20, eye_y - CELL_H // 2, "L", DIM)
+    panel.text(564 + eye_r + 8, eye_y - CELL_H // 2, "R", DIM)
+    panel.text(32, STATUS_CARD[3] - 12 - CELL_H, "SteamVR %s  %s" % (vr_version or "?", texture_path), DIM)
 
-    panel.text(32, BUTTON_Y0 - 12 - 30, "SteamVR %s  %s" % (vr_version or "?", texture_path), DIM)
+    # -- settings card
+    host = settings.pc_host()
+    x0, y0, x1, y1 = ROW_SENDING
+    panel.text(32, y0 + 4, "Sending to PC", TEXT)
+    caption = ("-> %s (VRCFT module)" % settings.raw[0]) if settings.raw else "no PC address set"
+    panel.text(32, y0 + 27, caption[:CAPTION_CHARS], DIM)
+    draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, settings.enabled, hot == "sending")
 
-    labels = {
-        "sending": "Sending: %s" % ("ON" if settings.enabled else "OFF"),
-        "address": "PC address",
-        "vrchat": "VRChat: %s" % ("ON" if settings.target else "OFF"),
-    }
-    for bid, x0, x1 in BUTTONS:
-        on = (bid == "sending" and settings.enabled) or (bid == "vrchat" and settings.target) or bid == "address"
-        color = BUTTON_HOT if hot == bid else (BUTTON if on else BUTTON_OFF)
-        panel.fill(color, x0, BUTTON_Y0, x1, BUTTON_Y1)
-        panel.outline(ACCENT, x0, BUTTON_Y0, x1, BUTTON_Y1)
-        label = labels[bid]
-        panel.text(x0 + (x1 - x0 - panel.text_width(label)) // 2, BUTTON_Y0 + (BUTTON_H - bitmap_font.CELL_H) // 2,
-                   label, TEXT, bg=color)
+    x0, y0, x1, y1 = ROW_ADDRESS
+    panel.text(32, y0 + (y1 - y0 - CELL_H) // 2, "PC address", TEXT)
+    draw_field(panel, FIELD_X0, y0, FIELD_X1, y1,
+               editing_text if editing_text is not None else (settings.raw[0] if settings.raw else ""),
+               hot == "address", editing_text is not None)
+
+    x0, y0, x1, y1 = ROW_VRCHAT
+    panel.text(32, y0 + 4, "VRChat direct OSC (PC)", TEXT)
+    if settings.target:
+        caption = "FT/v2 -> %s (no VRCFT)" % settings.target
+    elif host:
+        caption = "no VRCFT: FT/v2 -> %s:%d" % (host, VRCHAT_OSC_PORT)
+    else:
+        caption = "needs the PC address"
+    panel.text(32, y0 + 27, caption[:CAPTION_CHARS], DIM)
+    draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, bool(settings.target), hot == "vrchat")
 
 
 # ----------------------------------------------------------------------------- settings
@@ -266,6 +305,7 @@ class Settings:
         self.raw = [r for r in args.raw if r and r != "none"]
         self.target = args.target if args.target and args.target != "none" else None
         self.enabled = True
+        self.mouse_origin_bottom = True   # OpenVR mouse events are in GL space (0,0 = bottom left)
         cfg = load_config()
         if isinstance(cfg.get("raw"), list):
             self.raw = [str(r) for r in cfg["raw"]]
@@ -273,9 +313,13 @@ class Settings:
             self.target = cfg["target"] or None
         if "enabled" in cfg:
             self.enabled = bool(cfg["enabled"])
+        if "mouse_origin_bottom" in cfg:
+            self.mouse_origin_bottom = bool(cfg["mouse_origin_bottom"])
 
     def save(self):
-        save_config({"raw": self.raw, "target": self.target, "enabled": self.enabled})
+        cfg = load_config()
+        cfg.update({"raw": self.raw, "target": self.target, "enabled": self.enabled})
+        save_config(cfg)
 
     def apply(self, runtime):
         runtime.set_targets(raw=self.raw, osc=self.target)
@@ -330,6 +374,8 @@ class OverlayApp:
         self.panel = Panel(PANEL_W, PANEL_H)
         self.stop = threading.Event()
         self.hot = None
+        self.editing_text = None      # str while the address keyboard is open
+        self.clicks_logged = 0
         self.last_vr_attempt = 0.0
         self.vr_error_logged = None
         self.upload_failures = 0
@@ -389,6 +435,8 @@ class OverlayApp:
                 log.warning("GL texture path unavailable (%s); falling back to SetOverlayRaw at %.1f Hz",
                             e, 1.0 / REDRAW_SECONDS_RAW)
                 self.gl = None
+        self.editing_text = None
+        self.hot = None
         self.dirty = True
         self.redraw()
         return True
@@ -419,7 +467,8 @@ class OverlayApp:
         if snapshot is None:
             snapshot = self.runtime.snapshot()
         version = self.session.system.runtime_version()
-        draw_panel(self.panel, snapshot, self.settings, self.hot, version, "GL" if self.gl else "raw")
+        draw_panel(self.panel, snapshot, self.settings, self.hot, self.editing_text, version,
+                   "GL" if self.gl else "raw")
         try:
             if self.gl is not None:
                 self.gl.upload(self.panel.buf)
@@ -462,15 +511,21 @@ class OverlayApp:
         log.info("direct VRChat OSC %s", self.settings.target or "off")
 
     def edit_address(self):
+        existing = self.settings.raw[0] if self.settings.raw else ""
         try:
+            # Buffered (non-minimal) keyboard: SteamVR shows its own input line pre-filled with the
+            # current address; the result is read with GetKeyboardText on VREvent_KeyboardDone.
             self.session.overlay.show_keyboard(self.main_handle, "PC address for VRCFT (host or host:port)",
-                                               existing_text=self.settings.raw[0] if self.settings.raw else "",
-                                               max_chars=64, user_value=KEYBOARD_ADDRESS)
+                                               existing_text=existing, max_chars=64, user_value=KEYBOARD_ADDRESS,
+                                               flags=ovr.KeyboardFlag_Modal)
         except ovr.OpenVRError as e:
             log.warning("keyboard: %s", e)
+            return
+        self.editing_text = existing
 
     def keyboard_done(self):
         text = self.session.overlay.keyboard_text()
+        self.editing_text = None
         address = normalize_address(text, DEFAULT_RAW_PORT)
         if not address:
             log.warning("ignored PC address %r", text)
@@ -482,12 +537,41 @@ class OverlayApp:
         self.settings.save()
         log.info("PC address set to %s", address)
 
-    def handle_button(self, bid):
-        if bid == "sending":
+    def keyboard_event(self, event):
+        """Keyboard events arrive on the system queue and/or the overlay queue; handle either."""
+        et = event.eventType
+        if et == ovr.VREvent_KeyboardDone:
+            self.keyboard_done()
+        elif et == ovr.VREvent_KeyboardCharInput:
+            if self.editing_text is not None:
+                try:
+                    self.editing_text = self.session.overlay.keyboard_text()
+                except ovr.OpenVRError:
+                    pass
+        elif et == ovr.VREvent_KeyboardClosed:
+            self.editing_text = None
+        else:
+            return False
+        self.dirty = True
+        return True
+
+    def panel_point(self, event):
+        """Mouse event -> top-down panel pixel. OpenVR reports GL-space coordinates (0,0 bottom left)."""
+        x, y, _ = event.mouse()
+        if self.settings.mouse_origin_bottom:
+            y = PANEL_H - y
+        return int(x), int(y)
+
+    def handle_click(self, x, y):
+        cid = control_at(x, y)
+        if self.clicks_logged < 5:
+            self.clicks_logged += 1
+            log.info("click at %d,%d -> %s", x, y, cid)
+        if cid == "sending":
             self.toggle_sending()
-        elif bid == "vrchat":
+        elif cid == "vrchat":
             self.toggle_vrchat()
-        elif bid == "address":
+        elif cid == "address":
             self.edit_address()
         self.dirty = True
 
@@ -504,31 +588,27 @@ class OverlayApp:
                 log.info("SteamVR requested quit")
                 session.system.acknowledge_quit_exiting()
                 return False
-            if event.eventType == ovr.VREvent_KeyboardDone:
-                self.keyboard_done()
-                self.dirty = True
+            self.keyboard_event(event)
         while True:
             event = session.overlay.poll_next_overlay_event(self.main_handle)
             if event is None:
                 break
             et = event.eventType
             if et == ovr.VREvent_MouseMove:
-                x, y, _ = event.mouse()
-                hot = button_at(x, y)
+                x, y = self.panel_point(event)
+                hot = control_at(x, y)
                 if hot != self.hot:
                     self.hot = hot
                     self.dirty = True
             elif et == ovr.VREvent_MouseButtonDown:
-                x, y, _ = event.mouse()
-                bid = button_at(x, y)
-                if bid:
-                    self.handle_button(bid)
-            elif et == ovr.VREvent_KeyboardDone:
-                self.keyboard_done()
-                self.dirty = True
-            elif et == ovr.VREvent_OverlayHidden:
-                self.hot = None
-                self.dirty = True
+                x, y = self.panel_point(event)
+                self.handle_click(x, y)
+            elif et in (ovr.VREvent_OverlayHidden, ovr.VREvent_FocusLeave):
+                if self.hot is not None:
+                    self.hot = None
+                    self.dirty = True
+            else:
+                self.keyboard_event(event)
         return True
 
     def is_visible(self, now):
@@ -826,7 +906,7 @@ def main(argv=None):
         lock.close()
         return 1
     if not app.settings.raw and not app.settings.target:
-        log.warning("no PC address configured yet; set it in the dashboard tab (PC address button)")
+        log.warning("no PC address configured yet; enter it in the dashboard tab (PC address field)")
 
     def request_stop(signum, _frame):
         log.info("signal %d, stopping", signum)
