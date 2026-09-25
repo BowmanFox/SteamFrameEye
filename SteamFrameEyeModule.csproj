@@ -9,9 +9,12 @@
     <Version>0.1.0</Version>
     <Platforms>AnyCPU</Platforms>
     <!-- VRCFT 5.4.x ships as a self-contained .NET 10 app; modules are loaded into its
-         VRCFaceTracking.ModuleProcess sandbox, so reference the installed assemblies and
-         do not copy them next to the module DLL. Override with -p:VrcftDir=... -->
-    <VrcftDir Condition="'$(VrcftDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\VRCFaceTracking</VrcftDir>
+         VRCFaceTracking.ModuleProcess sandbox, so reference the VRCFT assemblies and do not
+         copy them next to the module DLL. Resolution order: -p:VrcftDir=..., the local Steam
+         install, then the vendored reference copies in lib/vrcft-5.4.5 (used by CI). -->
+    <VrcftSteamDir>C:\Program Files (x86)\Steam\steamapps\common\VRCFaceTracking</VrcftSteamDir>
+    <VrcftDir Condition="'$(VrcftDir)' == '' And Exists('$(VrcftSteamDir)\VRCFaceTracking.Core.dll')">$(VrcftSteamDir)</VrcftDir>
+    <VrcftDir Condition="'$(VrcftDir)' == ''">$(MSBuildThisFileDirectory)lib\vrcft-5.4.5</VrcftDir>
   </PropertyGroup>
 
   <ItemGroup>

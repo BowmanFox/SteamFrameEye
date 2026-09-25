@@ -73,3 +73,26 @@ VRCFaceTracking 5.4.5 (Steam build, .NET 10) loaded the module in its sandbox pr
 - **"another module already claimed eye tracking":** a second eye module (for example the Steam Link module) is installed and won the race. Uninstall it in VRCFT's module registry or move its folder out of `CustomLibs`.
 - **"no packets for 1.5 s":** headset asleep, not worn, sender stopped, or a firewall between headset and PC. Check with `python tools\send_test_packets.py` (loopback) and with `ss -u` / the service journal on the headset.
 - **Port clash:** 9015 is used by Steam Link's face-tracking OSC; this module defaults to 9021. Change it in `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.json`.
+
+## How VRCFaceTracking loads modules (5.4.x, from the decompiled binaries)
+
+1. **Discovery** (`ModuleDataService`): two lists, concatenated in this order.
+   - *Installed modules*: every sub-folder of `%APPDATA%\VRCFaceTracking\CustomLibs\` that holds a `module.json`; the DLL named by its `DllFileName` is the load path. This is what the in-app registry (`https://registry.vrcft.io/`) and "install local module" produce.
+   - *Legacy modules*: every `*.dll` directly in `CustomLibs\`.
+2. **One sandbox per module** (`UnifiedLibManager`): for each DLL VRCFT starts `VRCFaceTracking.ModuleProcess.exe --port <ipc-port> --module-path <dll> --parent-pid <pid>` (hidden window). The path to that exe is resolved **relative to VRCFT's working directory**, so VRCFT must be started from its install folder (Steam does this).
+3. **Loading inside the sandbox** (`ModuleProcess.ModuleAssembly`): the DLL goes into a collectible `AssemblyLoadContext`; modules referencing `VRCFaceTracking`/`VRCFaceTracking.Core` older than 5.0 are skipped; the first exported type whose base class is `ExtTrackingModule` is instantiated with `Activator.CreateInstance`. `Logger` is a proxy that forwards to the main process.
+4. **Handshake and capability negotiation** over the local IPC: `Supported` is queried, then `Initialize(eyeAvailable, expressionAvailable)` is called with `eyeAvailable`/`expressionAvailable` = "no earlier module has claimed that data type yet". Modules are initialized in discovery order, so an earlier module wins the eyes; this module returns `(false, false)` in that case.
+5. **Update loop**: the sandbox calls `Update()` in its own thread and, on each host `EventUpdate`, serializes `UnifiedTracking.Data` (eye, expressions, head) back to the main process (`ReplyUpdatePacket`), which applies the eye part only from the module that owns eyes. `Update()` should block or sleep briefly; this module waits up to 20 ms for a new packet.
+6. **Teardown**: `Teardown()` is invoked through IPC, then the sandbox receives SIGTERM.
+
+Consequences for packaging: a release zip must contain `module.json` + the DLL at its root (`InstallLocalModule` extracts it, requires `module.json`, and moves the folder to `CustomLibs\<ModuleId>\`), and the module must target the same .NET major as VRCFT (10.0 for 5.4.x).
+
+## Releases (Forgejo Actions)
+
+`.forgejo/workflows/release.yml` runs on the org `ubuntu-latest` runner: push a tag `vX.Y.Z` → `dotnet build` against the vendored reference assemblies in `lib/vrcft-5.4.5` → `packaging/package.sh` → Forgejo release with
+`SteamFrameEyeModule-X.Y.Z.zip` (module.json + DLL, VRCFT "install local module" format), `SteamFrameEye-headset-X.Y.Z.tar.gz` (sender + unit) and `module.json`. A manual dispatch without a tag only builds and packages. The `ModuleId` is fixed in `packaging/module-id.txt` so re-installs replace rather than duplicate the module.
+
+## Install options
+
+- **Release zip:** VRCFT → module registry page → install local module → pick the zip; or unzip it into `%APPDATA%\VRCFaceTracking\CustomLibs\<ModuleId>\`.
+- **Developer:** copy `bin\Release\net10.0\SteamFrameEyeModule.dll` into `CustomLibs\` (legacy root-DLL loading). Do not keep both variants installed.
