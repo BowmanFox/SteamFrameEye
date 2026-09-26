@@ -50,6 +50,8 @@ The settings card is used with the laser pointer. A click anywhere in a row acts
 
 Direct OSC sends `/avatar/parameters/FT/EyeTrackingActive` (true) and, under `/avatar/parameters/FT/v2/`, `EyeLeftX`, `EyeLeftY`, `EyeRightX`, `EyeRightY`, `EyeX`, `EyeY`, `EyeLidLeft` and `EyeLidRight`. Gaze values are atan2(x, -z) · 4/π clamped to ±1, so ±45° maps to ±1. The prefix `/FT` can be changed with `--prefix`.
 
+Direct OSC sends the eye server's values as they are: per-eye gaze on that ±45° scale, uncalibrated eyelids, no smoothing. The smoothing, the per-eye eyelid calibration and the Quest Pro scale are done by the VRCFaceTracking module, so use it where possible.
+
 All settings are written to `~/frameeye/frameeye.conf.json` immediately and survive restarts. They take precedence over the manifest arguments. A later `--install --raw <pc>:<port>` overwrites the address in that file.
 
 ```json
@@ -118,6 +120,7 @@ python3 frameeye_osc.py --raw <pc-ip>:9021 [--target <pc-ip>:9000] [--verbose]
 - `install-overlay.sh`, `frameeye_overlay.sh`: installer and the launcher SteamVR runs.
 - `frameeye-osc.service`: systemd user unit for the stand-alone sender.
 - `icon.png`, `tools/gen_icon.py`: the dashboard icon and its generator.
+- `tools/record_eyes.py`: records raw eye-server samples to CSV for tuning the module's processing (see the main README).
 
 ## License
 

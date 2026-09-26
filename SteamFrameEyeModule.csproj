@@ -6,7 +6,7 @@
     <Nullable>enable</Nullable>
     <AssemblyName>SteamFrameEyeModule</AssemblyName>
     <RootNamespace>SteamFrameEyeModule</RootNamespace>
-    <Version>0.1.0</Version>
+    <Version>0.5.0</Version>
     <Platforms>AnyCPU</Platforms>
     <!-- VRCFT 5.4.x ships as a self-contained .NET 10 app; modules are loaded into its
          VRCFaceTracking.ModuleProcess sandbox, so reference the VRCFT assemblies and do not
@@ -16,6 +16,12 @@
     <VrcftDir Condition="'$(VrcftDir)' == '' And Exists('$(VrcftSteamDir)\VRCFaceTracking.Core.dll')">$(VrcftSteamDir)</VrcftDir>
     <VrcftDir Condition="'$(VrcftDir)' == ''">$(MSBuildThisFileDirectory)lib\vrcft-5.4.5</VrcftDir>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- tools/ReplayProbe is its own project; keep its sources and build output out of the module. -->
+    <Compile Remove="tools/**" />
+    <None Remove="tools/**" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="VRCFaceTracking.SDK">

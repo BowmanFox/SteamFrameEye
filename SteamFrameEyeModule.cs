@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Net;
 using System.Net.Sockets;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 using VRCFaceTracking;
 
@@ -10,44 +11,42 @@ namespace SteamFrameEyeModule;
 /// <summary>
 /// VRCFaceTracking module for the Valve Steam Frame's built-in eye tracking.
 ///
-/// The headset runs frameeye_osc.py, which reads the eye-tracking server's shared memory
+/// FrameEye Bridge on the headset reads the eye-tracking server's shared memory
 /// (/dev/shm/eye-server.mmap: per-eye gaze direction, fixation point, eyelid openness) and
-/// sends one "SFEY" UDP packet per sample to this PC. This module receives those packets and
-/// feeds per-eye gaze and openness into VRCFT, so VRCFT stays the single hub next to a
-/// mouth tracker such as Project Babble.
+/// sends one "SFEY" UDP packet per sample to this PC. This module receives those packets,
+/// processes them (EyeProcessor: dropout removal, per-eye eyelid calibration, One Euro smoothing,
+/// gaze held during blinks) and feeds gaze and openness into VRCFT, so VRCFT stays the single
+/// hub next to a mouth tracker such as Project Babble.
 ///
-/// Gaze mapping follows konsti219/frameeyeosc: atan2(x, -z) * 4/pi, clamped to [-1, 1],
-/// i.e. +-45 degrees map to +-1, which is what the VRCFT "v2" eye parameters expect.
+/// Values are written the way the Steam Link module writes a Quest Pro's: one combined gaze for
+/// both eyes as atan2(x, -z), atan2(y, -z) in radians, openness 0 (closed) .. 1 (open), pupil pinned.
 /// </summary>
 public class SteamFrameEyeModule : ExtTrackingModule
 {
-    // 9015 is taken by Steam Link's face-tracking OSC output on PCs that use it; stay clear of it.
-    private const int DefaultPort = 9021;
     private const int PacketLength = 96;
     private const ushort PacketVersion = 1;
-    private const float Scale = 4f / MathF.PI;
     private const double StaleSeconds = 1.5;
+    private static readonly TimeSpan CalibrationSaveInterval = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan CalibrationLogInterval = TimeSpan.FromMinutes(5);
 
-    private struct Sample
-    {
-        public uint Seq;
-        public double SampleTime;
-        public bool Valid;
-        public float LX, LY, LZ, RX, RY, RZ, FX, FY, FZ;
-        public float OpenL, OpenR;
-    }
+    private static string ConfigDir => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VRCFaceTracking");
+    private static string SettingsPath => Path.Combine(ConfigDir, "SteamFrameEyeModule.json");
+    private static string CalibrationPath => Path.Combine(ConfigDir, "SteamFrameEyeModule.calibration.json");
 
     private UdpClient? _udp;
     private Thread? _rxThread;
     private volatile bool _running;
     private readonly object _lock = new();
     private readonly AutoResetEvent _newData = new(false);
-    private Sample _latest;
+    private EyeSettings _settings = new();
+    private EyeProcessor? _processor;
+    private EyeOutput _latest;
     private bool _have;
     private DateTime _lastRx = DateTime.MinValue;
     private long _rxCount, _badCount;
     private bool _loggedFirst, _loggedStale;
-    private int _port = DefaultPort;
+    private DateTime _nextSave, _nextCalibrationLog;
 
     public override (bool SupportsEye, bool SupportsExpression) Supported => (true, false);
 
@@ -61,24 +60,34 @@ public class SteamFrameEyeModule : ExtTrackingModule
             return (false, false);
         }
 
-        _port = ReadPortSetting();
+        _settings = EyeSettings.Load(SettingsPath, m => Logger.LogWarning("SteamFrameEye: {Message}", m));
+        if (int.TryParse(Environment.GetEnvironmentVariable("SFEYE_PORT"), out var envPort) && envPort is > 0 and < 65536)
+        {
+            _settings.Port = envPort;
+        }
+        _processor = new EyeProcessor(_settings, LoadCalibration());
+
         try
         {
-            _udp = new UdpClient(new IPEndPoint(IPAddress.Any, _port));
+            _udp = new UdpClient(new IPEndPoint(IPAddress.Any, _settings.Port));
             _udp.Client.ReceiveTimeout = 500;
         }
         catch (Exception e)
         {
-            Logger.LogError("SteamFrameEye: cannot bind UDP port {Port}: {Message}", _port, e.Message);
+            Logger.LogError("SteamFrameEye: cannot bind UDP port {Port}: {Message}", _settings.Port, e.Message);
             return (false, false);
         }
 
+        _nextSave = DateTime.UtcNow + CalibrationSaveInterval;
+        _nextCalibrationLog = DateTime.UtcNow + TimeSpan.FromSeconds(60);
         _running = true;
         _rxThread = new Thread(ReceiveLoop) { IsBackground = true, Name = "SteamFrameEyeRx" };
         _rxThread.Start();
         Logger.LogInformation(
-            "SteamFrameEye: listening on UDP {Port}; on the headset, enter this PC's address in FrameEye Bridge",
-            _port);
+            "SteamFrameEye: listening on UDP {Port}; on the headset, enter this PC's address in FrameEye Bridge. " +
+            "Gaze {Gaze}, smoothing {Smoothing}, calibration {Calibration} ({Lids})",
+            _settings.Port, _settings.CombinedGaze ? "combined" : "per eye", _settings.Smoothing ? "on" : "off",
+            _settings.Calibration, DescribeLids(_processor));
         return (true, false);
     }
 
@@ -87,12 +96,12 @@ public class SteamFrameEyeModule : ExtTrackingModule
         // Wait briefly for a new packet so this loop does not spin; VRCFT calls Update() repeatedly.
         _newData.WaitOne(20);
 
-        Sample s;
+        EyeOutput o;
         bool have;
         DateTime last;
         lock (_lock)
         {
-            s = _latest;
+            o = _latest;
             have = _have;
             last = _lastRx;
         }
@@ -116,21 +125,15 @@ public class SteamFrameEyeModule : ExtTrackingModule
             Logger.LogInformation("SteamFrameEye: packets resumed");
             _loggedStale = false;
         }
-        if (!s.Valid)
-        {
-            return;
-        }
 
-        var (lx, ly) = GazeAngles(s.LX, s.LY, s.LZ);
-        var (rx, ry) = GazeAngles(s.RX, s.RY, s.RZ);
-
-        UnifiedTracking.Data.Eye.Left.Gaze.x = lx;
-        UnifiedTracking.Data.Eye.Left.Gaze.y = ly;
-        UnifiedTracking.Data.Eye.Right.Gaze.x = rx;
-        UnifiedTracking.Data.Eye.Right.Gaze.y = ry;
-        UnifiedTracking.Data.Eye.Left.Openness = Math.Clamp(s.OpenL, 0f, 1f);
-        UnifiedTracking.Data.Eye.Right.Openness = Math.Clamp(s.OpenR, 0f, 1f);
-        // No pupil size in the headset data; pin a neutral value so dilation parameters stay sane.
+        UnifiedTracking.Data.Eye.Left.Gaze.x = o.LeftX;
+        UnifiedTracking.Data.Eye.Left.Gaze.y = o.LeftY;
+        UnifiedTracking.Data.Eye.Right.Gaze.x = o.RightX;
+        UnifiedTracking.Data.Eye.Right.Gaze.y = o.RightY;
+        UnifiedTracking.Data.Eye.Left.Openness = o.OpenL;
+        UnifiedTracking.Data.Eye.Right.Openness = o.OpenR;
+        // No pupil size in the headset data; pin a neutral value so dilation parameters stay sane
+        // (the Steam Link module does the same for a Quest Pro).
         UnifiedTracking.Data.Eye.Left.PupilDiameter_MM = 5f;
         UnifiedTracking.Data.Eye.Right.PupilDiameter_MM = 5f;
         UnifiedTracking.Data.Eye._minDilation = 0f;
@@ -138,8 +141,8 @@ public class SteamFrameEyeModule : ExtTrackingModule
 
         if (!_loggedFirst)
         {
-            Logger.LogInformation("SteamFrameEye: first sample seq={Seq} L=({Lx:F2},{Ly:F2}) R=({Rx:F2},{Ry:F2}) lids=({Ol:F2},{Or:F2})",
-                s.Seq, lx, ly, rx, ry, s.OpenL, s.OpenR);
+            Logger.LogInformation("SteamFrameEye: first sample gaze L=({Lx:F2},{Ly:F2}) R=({Rx:F2},{Ry:F2}) rad, lids=({Ol:F2},{Or:F2})",
+                o.LeftX, o.LeftY, o.RightX, o.RightY, o.OpenL, o.OpenR);
             _loggedFirst = true;
         }
     }
@@ -149,12 +152,18 @@ public class SteamFrameEyeModule : ExtTrackingModule
         _running = false;
         try { _udp?.Close(); } catch { /* ignore */ }
         _rxThread?.Join(1000);
-        Logger.LogInformation("SteamFrameEye: stopped after {Rx} packets ({Bad} rejected)", _rxCount, _badCount);
+        if (_processor is not null && _settings.Calibration == "auto" && CalibrationWorthSaving(_processor))
+        {
+            SaveCalibration(_processor);
+        }
+        Logger.LogInformation("SteamFrameEye: stopped after {Rx} packets ({Bad} rejected); {Lids}",
+            _rxCount, _badCount, _processor is null ? "-" : DescribeLids(_processor));
     }
 
     private void ReceiveLoop()
     {
         var any = new IPEndPoint(IPAddress.Any, 0);
+        var processor = _processor!;
         while (_running && _udp != null)
         {
             byte[] buf;
@@ -171,21 +180,79 @@ public class SteamFrameEyeModule : ExtTrackingModule
                 break;
             }
 
-            if (TryParse(buf, out var s))
-            {
-                lock (_lock)
-                {
-                    _latest = s;
-                    _have = true;
-                    _lastRx = DateTime.UtcNow;
-                }
-                _rxCount++;
-                _newData.Set();
-            }
-            else
+            if (!TryParse(buf, out var s))
             {
                 _badCount++;
+                continue;
             }
+            _rxCount++;
+            if (!s.Valid)
+            {
+                continue;
+            }
+            var o = processor.Process(s);
+            lock (_lock)
+            {
+                _latest = o;
+                _have = true;
+                _lastRx = DateTime.UtcNow;
+            }
+            _newData.Set();
+
+            var now = DateTime.UtcNow;
+            if (now >= _nextSave && _settings.Calibration == "auto" && CalibrationWorthSaving(processor))
+            {
+                _nextSave = now + CalibrationSaveInterval;
+                SaveCalibration(processor);
+            }
+            if (now >= _nextCalibrationLog)
+            {
+                _nextCalibrationLog = now + CalibrationLogInterval;
+                Logger.LogInformation("SteamFrameEye: {Lids}; gaze held during blinks {Held:F1} %, unreliable tracking {Bad:F1} % of samples",
+                    DescribeLids(processor), 100.0 * processor.GazeHeldSamples / Math.Max(1, processor.Samples),
+                    100.0 * processor.UnreliableSamples / Math.Max(1, processor.Samples));
+            }
+        }
+    }
+
+    private static string DescribeLids(EyeProcessor p) =>
+        $"lids left closed {p.Left.Calibration.Closed:F2} open {p.Left.Calibration.Open:F2}, " +
+        $"right closed {p.Right.Calibration.Closed:F2} open {p.Right.Calibration.Open:F2} " +
+        $"({p.Left.Calibration.BlinksSeen}/{p.Right.Calibration.BlinksSeen} blinks)";
+
+    /// <summary>Only keep what was learned from enough good data: ~30 s of reliable samples and a few blinks per eye.</summary>
+    private static bool CalibrationWorthSaving(EyeProcessor p) =>
+        p.ReliableSamples >= 2700 && p.Left.Calibration.BlinksSeen >= 5 && p.Right.Calibration.BlinksSeen >= 5;
+
+    private JsonNode? LoadCalibration()
+    {
+        if (_settings.Calibration != "auto" || !File.Exists(CalibrationPath))
+        {
+            return null;
+        }
+        try
+        {
+            return JsonNode.Parse(File.ReadAllText(CalibrationPath));
+        }
+        catch (Exception e)
+        {
+            Logger.LogWarning("SteamFrameEye: ignoring {File}: {Message}", Path.GetFileName(CalibrationPath), e.Message);
+            return null;
+        }
+    }
+
+    private void SaveCalibration(EyeProcessor p)
+    {
+        try
+        {
+            Directory.CreateDirectory(ConfigDir);
+            var tmp = CalibrationPath + ".tmp";
+            File.WriteAllText(tmp, p.CalibrationJson().ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            File.Move(tmp, CalibrationPath, true);
+        }
+        catch (Exception e)
+        {
+            Logger.LogWarning("SteamFrameEye: could not save the eyelid calibration: {Message}", e.Message);
         }
     }
 
@@ -194,7 +261,7 @@ public class SteamFrameEyeModule : ExtTrackingModule
     /// f64 sample_time, f32 gazeL[3], gazeR[3], fixation[3], openness L, openness R,
     /// f32 covL[3], covR[3], f64 send_time.
     /// </summary>
-    private static bool TryParse(ReadOnlySpan<byte> b, out Sample s)
+    private static bool TryParse(ReadOnlySpan<byte> b, out EyeSample s)
     {
         s = default;
         if (b.Length < PacketLength || b[0] != (byte)'S' || b[1] != (byte)'F' || b[2] != (byte)'E' || b[3] != (byte)'Y')
@@ -206,13 +273,15 @@ public class SteamFrameEyeModule : ExtTrackingModule
             return false;
         }
         var flags = BinaryPrimitives.ReadUInt16LittleEndian(b.Slice(6));
-        s.Seq = BinaryPrimitives.ReadUInt32LittleEndian(b.Slice(8));
         s.SampleTime = BinaryPrimitives.ReadDoubleLittleEndian(b.Slice(12));
         s.LX = ReadF(b, 0); s.LY = ReadF(b, 1); s.LZ = ReadF(b, 2);
         s.RX = ReadF(b, 3); s.RY = ReadF(b, 4); s.RZ = ReadF(b, 5);
         s.FX = ReadF(b, 6); s.FY = ReadF(b, 7); s.FZ = ReadF(b, 8);
         s.OpenL = ReadF(b, 9); s.OpenR = ReadF(b, 10);
+        s.CovL = MathF.Max(ReadF(b, 11), MathF.Max(ReadF(b, 12), ReadF(b, 13)));
+        s.CovR = MathF.Max(ReadF(b, 14), MathF.Max(ReadF(b, 15), ReadF(b, 16)));
         s.Valid = (flags & 1) != 0
+                  && double.IsFinite(s.SampleTime)
                   && float.IsFinite(s.LX) && float.IsFinite(s.LY) && float.IsFinite(s.LZ)
                   && float.IsFinite(s.RX) && float.IsFinite(s.RY) && float.IsFinite(s.RZ)
                   && float.IsFinite(s.OpenL) && float.IsFinite(s.OpenR);
@@ -222,40 +291,4 @@ public class SteamFrameEyeModule : ExtTrackingModule
     /// <summary>i-th float of the payload that starts at byte 20.</summary>
     private static float ReadF(ReadOnlySpan<byte> b, int i) =>
         BinaryPrimitives.ReadSingleLittleEndian(b.Slice(20 + i * 4));
-
-    private static (float x, float y) GazeAngles(float x, float y, float z)
-    {
-        var ax = MathF.Atan2(x, -z) * Scale;
-        var ay = MathF.Atan2(y, -z) * Scale;
-        return (Math.Clamp(ax, -1f, 1f), Math.Clamp(ay, -1f, 1f));
-    }
-
-    /// <summary>Port from %APPDATA%\VRCFaceTracking\SteamFrameEyeModule.json {"port": 9015} or env SFEYE_PORT.</summary>
-    private int ReadPortSetting()
-    {
-        var port = DefaultPort;
-        try
-        {
-            var cfg = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "VRCFaceTracking", "SteamFrameEyeModule.json");
-            if (File.Exists(cfg))
-            {
-                using var doc = JsonDocument.Parse(File.ReadAllText(cfg));
-                if (doc.RootElement.TryGetProperty("port", out var pe) && pe.TryGetInt32(out var p) && p > 0 && p < 65536)
-                {
-                    port = p;
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            Logger.LogWarning("SteamFrameEye: could not read SteamFrameEyeModule.json: {Message}", e.Message);
-        }
-        var env = Environment.GetEnvironmentVariable("SFEYE_PORT");
-        if (int.TryParse(env, out var ep) && ep > 0 && ep < 65536)
-        {
-            port = ep;
-        }
-        return port;
-    }
 }
