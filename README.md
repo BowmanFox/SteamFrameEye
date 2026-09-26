@@ -67,6 +67,17 @@ MIT for this module. The shared-memory layout and OSC conventions are from frame
   - `tools/gen_icon.py` regenerates `icon.png`.
 - `lib/vrcft-5.4.5/` — compile-time reference assemblies (see NOTICE.md), `packaging/` — release packaging, `tools/send_test_packets.py` — loopback test for the module.
 
+### Public mirrors on GitHub
+
+- `headset/` is published as [CyrusOtter/SteamFrameEye](https://github.com/CyrusOtter/SteamFrameEye), a `git subtree split` of this folder, so `headset/README.md`, `headset/LICENSE` and `headset/.gitignore` are that repository's root files. Re-publish after changes (remote `github-overlay`; the split is deterministic, so this fast-forwards):
+
+  ```
+  git subtree split --prefix=headset -b overlay-split
+  git push github-overlay overlay-split:main
+  ```
+
+- The module is `Modules/SteamFrameEyeModule` on branch `feature/steamframe-eye-module` of the fork [CyrusOtter/VRCFaceTracking](https://github.com/CyrusOtter/VRCFaceTracking) (local clone `D:\Git\VRCFaceTracking`, remote `cyrusotter`). There it builds against the in-tree SDK/Core of the VRCFT 6.0 source line, or with `-p:VrcftDir=<VRCFT install>` against an installed release. It is a copy: port module changes there by hand.
+
 ### Headset install (SteamVR overlay)
 
 ```

@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+*.log.old
+*.lock
+frameeye.conf.json
+frameeye.conf.json.tmp
+frameeye.vrmanifest

@@ -9,7 +9,7 @@
   "AuthorName": "OTT Labs",
   "ModuleName": "Steam Frame Eye (network)",
   "ModuleDescription": "Per-eye gaze and eyelid openness from the Valve Steam Frame's built-in eye tracking, received over UDP from a small sender running on the headset.",
-  "UsageInstructions": "On the headset run frameeye_osc.py --raw <pc-ip>:9021 (see the bundled README). Data flows while the headset is worn.",
+  "UsageInstructions": "Install the Steam Frame Eye overlay app on the headset (github.com/CyrusOtter/SteamFrameEye) and enter this PC's address in its SteamVR dashboard tab. Data flows while the headset is worn.",
   "DownloadUrl": "__DOWNLOAD_URL__",
   "ModulePageUrl": "__PAGE_URL__",
   "DllFileName": "SteamFrameEyeModule.dll"
