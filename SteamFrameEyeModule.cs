@@ -208,7 +208,7 @@ public class SteamFrameEyeModule : ExtTrackingModule
             if (now >= _nextCalibrationLog)
             {
                 _nextCalibrationLog = now + CalibrationLogInterval;
-                Logger.LogInformation("SteamFrameEye: {Lids}; gaze held during blinks {Held:F1} %, unreliable tracking {Bad:F1} % of samples",
+                Logger.LogInformation("SteamFrameEye: {Lids}; gaze held {Held:F1} %, low-confidence samples (closed eyes or poor fit) {Bad:F1} %",
                     DescribeLids(processor), 100.0 * processor.GazeHeldSamples / Math.Max(1, processor.Samples),
                     100.0 * processor.UnreliableSamples / Math.Max(1, processor.Samples));
             }

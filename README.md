@@ -57,7 +57,7 @@ Measured on an eight-minute recording from a Steam Frame (see *Tuning with a rec
 
 What the module does with every sample:
 
-- **Quality check:** the eye server's gaze covariance is about 0.0004 with good tracking, up to about 0.02 at the bottom of a blink and about 0.05 when the headset is not properly on the face. Above 0.03 a sample counts as unreliable: gaze holds, the calibration does not learn from it, and after one second of unreliable data the eyes show neutral (open, looking ahead).
+- **Quality check:** the eye server reports a gaze covariance per eye: about 0.0004 with good tracking, and 0.02 to 0.05 when the eye is closed (the pupil is hidden), at the bottom of a blink or when the headset does not sit properly. Above 0.03 that eye's gaze is not used and the calibration pauses learning. Eyelids are never overridden, so a wink or eyes kept closed stay closed for as long as they are closed.
 - **Eyelids, per eye:**
   - A three-sample median removes the single-sample dropouts the Frame produces.
   - The calibration learns each eye's open level (85th percentile of the recent values) and closed level (median bottom of the last 30 blinks, where a blink takes the lid at least 40 % below the open level). The two eyes differ a lot: in the recording the left eye closed to about 0.2 and opened to about 0.95, while the right eye stayed at 1.0 when open and only reached about 0.3 to 0.4 in a blink.
@@ -65,10 +65,10 @@ What the module does with every sample:
   - A One Euro filter smooths without delaying blinks, then snap zones map the bottom 15 % to fully closed and the top 10 % to fully open.
   - Blink sync closes the second eye when one eye is fully closed and the other is mostly closed. Real winks, where the other eye stays open, are left alone.
   - A closed eye is held closed for 80 ms so short blinks survive VRChat's slower network sync for other players.
-- **Gaze:** both eyes are averaged into one gaze (like a Quest Pro via Steam Link), held while the lids are more than half closed, and smoothed with a One Euro filter tuned to let fast eye movements through.
+- **Gaze:** both eyes are averaged into one gaze (like a Quest Pro via Steam Link) and smoothed with a One Euro filter tuned to let fast eye movements through. Only eyes that are clearly open and tracked steer: during a wink the open eye steers both, during blinks and with both eyes closed the gaze holds.
 - **Persistence:** the learned levels are saved to `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.calibration.json` every minute and when VRCFaceTracking closes, but only after about 30 s of reliable data and a few blinks per eye. A saved file with implausible values is ignored.
 
-VRCFaceTracking's own "Data Filter" mutation smooths every value again with fixed settings; leave it off for the eyes. The module logs its calibration every five minutes, for example `lids left closed 0.19 open 0.95, right closed 0.39 open 1.00 (174/116 blinks); gaze held during blinks 3.7 %, unreliable tracking 2.4 % of samples`.
+VRCFaceTracking's own "Data Filter" mutation smooths every value again with fixed settings; leave it off for the eyes. The module logs its calibration every five minutes, for example `lids left closed 0.19 open 0.95, right closed 0.39 open 1.00 (174/116 blinks); gaze held 7.8 %, low-confidence samples (closed eyes or poor fit) 2.4 %`.
 
 ## The VRCFaceTracking module
 
@@ -113,9 +113,9 @@ All settings are optional, in `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.jso
 | `closed_snap`, `open_snap` | 0.15, 0.9 | calibrated openness below / above these shows fully closed / open |
 | `blink_sync`, `blink_sync_below` | true, 0.35 | close the second eye with the first when it is below this |
 | `blink_hold_ms` | 80 | keep a closed eye closed this long (0 disables) |
-| `gaze_hold_below` | 0.4 | hold gaze while the mean eyelid openness is below this |
-| `quality_limit` | 0.03 | gaze covariance above this marks a sample unreliable (0 disables) |
-| `neutral_after_ms` | 1000 | unreliable this long: neutral eyes |
+| `gaze_hold_below` | 0.6 | an eye's gaze is only used while its calibrated openness is at least this |
+| `gaze_single_eye_above` | 0.8 | ...and at least this when it is the only eye steering (a wink) |
+| `quality_limit` | 0.03 | an eye's gaze covariance above this keeps its gaze out and pauses learning (0 disables) |
 
 To restart the calibration from scratch, delete `SteamFrameEyeModule.calibration.json` while VRCFaceTracking is closed.
 
@@ -125,7 +125,7 @@ To restart the calibration from scratch, delete `SteamFrameEyeModule.calibration
 - **Log location:** `%USERPROFILE%\Documents\VRCFaceTracking\latest.log`. Documents may be redirected to OneDrive.
 - **Another module gets the eyes:** VRCFaceTracking 5.4.5 starts all modules at once and gives the eyes to whichever answers first, so with the Steam Link module installed the Frame's eyes may go to Steam Link in some sessions. Without a Quest streaming through Steam Link, the Steam Link module receives nothing and only logs connection errors; remove it when you use the Frame. In 5.4.5 the log line `Got init for module ... Eye: ... Expr: ...` prints the eye flag twice, so its `Expr` value is not the expression claim.
 - **"no packets for 1.5 s":** the headset is asleep or not worn, FrameEye Bridge has sending switched off, or a firewall blocks UDP between headset and PC. `python tools\send_test_packets.py [host] [port] [count]` sends synthetic packets (a slow horizontal sweep with blinks) to test the PC side without a headset; loopback needs no firewall rule.
-- **Eyes stay neutral and the log reports a high share of unreliable tracking:** the headset does not sit properly on the face. Check the fit.
+- **The log reports a high share of low-confidence samples while your eyes are open:** the headset does not sit properly on the face. Check the fit. Closed eyes count as low confidence too, so the share is also high after keeping your eyes closed.
 - **Port clash:** Steam Link's face-tracking OSC output uses UDP 9015. The module defaults to 9021 to stay clear of it.
 
 ### How VRCFaceTracking loads modules (5.4.x)

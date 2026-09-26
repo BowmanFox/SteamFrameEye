@@ -39,11 +39,11 @@ public sealed class EyeSettings
     public bool BlinkSync = true;          // one eye fully closed and the other mostly closed: close both
     public float BlinkSyncBelow = 0.35f;
     public int BlinkHoldMs = 80;
-    public float GazeHoldBelow = 0.4f;     // freeze gaze while the mean eyelid openness is below this (blinks)
-    // Gaze covariance above this marks a sample as unreliable (good tracking ~0.0004, blinks up to ~0.02,
-    // headset not properly on the face ~0.05). 0 disables the check.
+    public float GazeHoldBelow = 0.6f;     // an eye's gaze is only used while its openness is at least this
+    public float GazeSingleEyeAbove = 0.8f; // ...and at least this when it is the only eye steering (a wink)
+    // An eye's gaze covariance above this marks its gaze as not tracked (good tracking ~0.0004; a closed eye,
+    // the bottom of a blink or a headset that does not sit properly reach 0.02-0.05). 0 disables the check.
     public float QualityLimit = 0.03f;
-    public int NeutralAfterMs = 1000;      // unreliable this long: show neutral eyes (open, looking ahead)
 
     public static EyeSettings Load(string path, Action<string> warn)
     {
@@ -90,8 +90,8 @@ public sealed class EyeSettings
             s.BlinkSyncBelow = Math.Clamp(Float("blink_sync_below", s.BlinkSyncBelow), 0f, 0.9f);
             s.BlinkHoldMs = Math.Clamp(Int("blink_hold_ms", s.BlinkHoldMs), 0, 500);
             s.GazeHoldBelow = Math.Clamp(Float("gaze_hold_below", s.GazeHoldBelow), 0f, 1f);
+            s.GazeSingleEyeAbove = Math.Clamp(Float("gaze_single_eye_above", s.GazeSingleEyeAbove), 0f, 1f);
             s.QualityLimit = MathF.Max(0f, Float("quality_limit", s.QualityLimit));
-            s.NeutralAfterMs = Math.Clamp(Int("neutral_after_ms", s.NeutralAfterMs), 100, 10000);
         }
         catch (Exception e)
         {
@@ -425,15 +425,15 @@ public sealed class EyeProcessor
     private readonly OneEuro _lx, _ly, _rx, _ry;
     private double _lastTime = double.NaN;
     private EyeOutput _out = new() { OpenL = 1f, OpenR = 1f };
-    private bool _haveGaze;
+    private float _pitchDeg;
 
     public LidPipeline Left { get; }
     public LidPipeline Right { get; }
     public long Samples { get; private set; }
     public long GazeHeldSamples { get; private set; }
+    /// <summary>Samples where at least one eye's gaze was not tracked (closed eye, blink bottom or poor fit).</summary>
     public long UnreliableSamples { get; private set; }
     public long ReliableSamples { get; private set; }
-    public bool Neutral { get; private set; }
     private double _unreliableSince = double.NaN;
     // Share of reliable samples over the last ~2 s. The bottom of a deep blink also raises the covariance
     // (the pupil is hidden), so learning follows this ratio instead of single samples.
@@ -485,13 +485,15 @@ public sealed class EyeProcessor
         var fdt = (float)Math.Clamp(dt, 0.004, 0.05);
         Samples++;
 
-        var cov = MathF.Max(x.CovL, x.CovR);
-        var reliable = _s.QualityLimit <= 0f || (float.IsFinite(cov) && cov < _s.QualityLimit);
+        // A closed eye hides its pupil and reports a high covariance, so low confidence is expected during blinks,
+        // winks and closed eyes: it keeps that eye's gaze out and pauses calibration learning, nothing more.
+        var trackedL = Tracked(x.CovL);
+        var trackedR = Tracked(x.CovR);
+        var reliable = trackedL && trackedR;
         if (reliable)
         {
             ReliableSamples++;
             _unreliableSince = double.NaN;
-            Neutral = false;
         }
         else
         {
@@ -500,26 +502,20 @@ public sealed class EyeProcessor
             {
                 _unreliableSince = x.SampleTime;
             }
-            if ((x.SampleTime - _unreliableSince) * 1000 >= _s.NeutralAfterMs)
-            {
-                // Tracking has been unusable for a while (headset not properly on the face): neutral eyes.
-                Neutral = true;
-                Left.Calibration.Interrupt();
-                Right.Calibration.Interrupt();
-                Left.Reset(); Right.Reset();
-                _lx.Reset(); _ly.Reset(); _rx.Reset(); _ry.Reset();
-                _out = new EyeOutput { OpenL = 1f, OpenR = 1f };
-                return _out;
-            }
         }
 
+        var (glx, gly) = Angles(x.LX, x.LY, x.LZ);
+        var (grx, gry) = Angles(x.RX, x.RY, x.RZ);
         var (cx, cy) = Angles(x.LX + x.RX, x.LY + x.RY, x.LZ + x.RZ);
-        var pitchDeg = cy * 180f / MathF.PI;
+        if (trackedL || trackedR)
+        {
+            _pitchDeg = (trackedL && trackedR ? cy : trackedL ? gly : gry) * 180f / MathF.PI;
+        }
         _reliability += fdt / (ReliabilitySeconds + fdt) * ((reliable ? 1f : 0f) - _reliability);
         var trusted = _reliability > LearnAboveReliability;
         var sustainedBad = !reliable && (x.SampleTime - _unreliableSince) * 1000 >= DropDipAfterUnreliableMs;
-        _out.OpenL = Left.Process(x.OpenL, x.SampleTime, fdt, pitchDeg, _s, trusted, sustainedBad);
-        _out.OpenR = Right.Process(x.OpenR, x.SampleTime, fdt, pitchDeg, _s, trusted, sustainedBad);
+        _out.OpenL = Left.Process(x.OpenL, x.SampleTime, fdt, _pitchDeg, _s, trusted, sustainedBad);
+        _out.OpenR = Right.Process(x.OpenR, x.SampleTime, fdt, _pitchDeg, _s, trusted, sustainedBad);
         if (_s.BlinkSync)
         {
             // Blinks are bilateral; the Frame sometimes tracks one eye's closure less deep than the other's.
@@ -535,24 +531,42 @@ public sealed class EyeProcessor
             }
         }
 
-        // During blinks the eye server's gaze estimate jumps by several degrees per sample; hold it.
-        var lids = (Left.Normalized + Right.Normalized) / 2f;
-        if ((lids < _s.GazeHoldBelow || !reliable) && _haveGaze)
+        // Gaze only from eyes that are open and tracked: during a blink the eye server's estimate jumps by
+        // several degrees per sample, and a closed eye's gaze is meaningless. One eye closed (a wink): the open
+        // eye steers both. Both closed: hold.
+        var useL = trackedL && Left.Normalized >= _s.GazeHoldBelow;
+        var useR = trackedR && Right.Normalized >= _s.GazeHoldBelow;
+        if (useL != useR)
+        {
+            // Only one eye qualifies: trust it only if clearly open (the open eye of a wink), not a lid that is
+            // half-way through a blink while the other eye has already lost tracking.
+            useL = useL && Left.Normalized >= _s.GazeSingleEyeAbove;
+            useR = useR && Right.Normalized >= _s.GazeSingleEyeAbove;
+        }
+        if (!useL && !useR)
         {
             GazeHeldSamples++;
             return _out;
         }
 
         float lx, ly, rx, ry;
-        if (_s.CombinedGaze)
+        if (useL && useR)
         {
-            (lx, ly) = (cx, cy);
-            (rx, ry) = (cx, cy);
+            if (_s.CombinedGaze)
+            {
+                (lx, ly) = (cx, cy);
+                (rx, ry) = (cx, cy);
+            }
+            else
+            {
+                (lx, ly) = (glx, gly);
+                (rx, ry) = (grx, gry);
+            }
         }
         else
         {
-            (lx, ly) = Angles(x.LX, x.LY, x.LZ);
-            (rx, ry) = Angles(x.RX, x.RY, x.RZ);
+            (lx, ly) = useL ? (glx, gly) : (grx, gry);
+            (rx, ry) = (lx, ly);
         }
         var ox = _s.GazeOffsetXDeg * MathF.PI / 180f;
         var oy = _s.GazeOffsetYDeg * MathF.PI / 180f;
@@ -575,9 +589,10 @@ public sealed class EyeProcessor
         _out.LeftY = ly * _s.GazeScale;
         _out.RightX = rx * _s.GazeScale;
         _out.RightY = ry * _s.GazeScale;
-        _haveGaze = true;
         return _out;
     }
+
+    private bool Tracked(float cov) => _s.QualityLimit <= 0f || (float.IsFinite(cov) && cov < _s.QualityLimit);
 
     /// <summary>Yaw and pitch in radians, atan2(x, -z) and atan2(y, -z), the Steam Link module's mapping.</summary>
     private static (float, float) Angles(float x, float y, float z)
