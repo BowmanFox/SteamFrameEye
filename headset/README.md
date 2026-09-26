@@ -2,7 +2,7 @@
 
 A SteamVR dashboard application for the Valve Steam Frame that forwards the headset's built-in eye tracking to VRCFaceTracking on a PC: per-eye gaze **and eyelid openness**, which the public OpenXR and OpenVR APIs do not expose.
 
-The receiving side is the Steam Frame Eye module of VRCFaceTracking, in [CyrusOtter/VRCFaceTracking](https://github.com/CyrusOtter/VRCFaceTracking) under [`Modules/SteamFrameEyeModule`](https://github.com/CyrusOtter/VRCFaceTracking/tree/master/Modules/SteamFrameEyeModule). As an alternative, the app can send the eye parameters straight to VRChat on the PC.
+The receiving side is the Steam Frame Eye module for VRCFaceTracking in the top folder of this repository; the [main README](../README.md) covers building and installing it. As an alternative, the app can send the eye parameters straight to VRChat on the PC.
 
 ## How it works
 
@@ -26,7 +26,7 @@ Copy this repository to the headset and run the installer with the PC's address.
 
 ```
 scp -r FrameEye-Bridge steamos@<headset-ip>:
-ssh steamos@<headset-ip> 'bash ~/FrameEye-Bridge/install-overlay.sh <pc-ip>:9021'
+ssh steamos@<headset-ip> 'bash ~/FrameEye-Bridge/headset/install-overlay.sh <pc-ip>:9021'
 ssh steamos@<headset-ip> 'python3 ~/frameeye/frameeye_overlay.py --status'
 ```
 
@@ -34,7 +34,7 @@ The installer copies the app to `~/frameeye`, disables the systemd unit variant 
 
 `python3 ~/frameeye/frameeye_overlay.py --uninstall` removes the registration and stops the app. The log is `~/frameeye/frameeye_overlay.log`.
 
-On the PC, install the Steam Frame Eye module in VRCFaceTracking (see its README) and allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
+On the PC, install the Steam Frame Eye module in VRCFaceTracking (see the [main README](../README.md)) and allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
 
 The SteamVR app key is `ottlabs.steamframeeye`, from the app's first name, so installs made before the rename update in place.
 
