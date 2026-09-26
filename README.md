@@ -5,12 +5,12 @@ VRCFaceTracking module for the Valve Steam Frame's built-in eye tracking: per-ey
 ## How it works
 
 ```
-Steam Frame                                   PC
-/dev/shm/eye-server.mmap  --> frameeye_osc.py --raw <pc>:9021 --UDP-->  SteamFrameEyeModule.dll (in VRCFT)
-(eye-tracking server)         (user service on the headset)             UnifiedTracking.Data.Eye.{Left,Right}.{Gaze,Openness}
+Steam Frame                                                  PC
+/dev/shm/eye-server.mmap --> FrameEye Bridge ---UDP 9021---> SteamFrameEyeModule.dll (in VRCFT)
+(eye-tracking server)        (headset/, SteamVR app)         UnifiedTracking.Data.Eye.{Left,Right}.{Gaze,Openness}
 ```
 
-- The headset side is `frameeye_osc.py` (stdlib Python, runs as a user systemd unit in `/home/steamos`, no root, read-only system untouched). It polls the sequence counter of the eye-tracking server's shared-memory object and sends one 96-byte `SFEY` packet per sample. Layout and gaze mapping follow [konsti219/frameeyeosc](https://github.com/konsti219/frameeyeosc) (MIT).
+- The headset side is **FrameEye Bridge** in `headset/`, a SteamVR dashboard app in standard-library Python (runs as `steamos` from `/home/steamos`, no root, read-only system untouched). It waits on the sequence counter of the eye-tracking server's shared-memory object and sends one 96-byte `SFEY` packet per sample. Layout and gaze mapping follow [konsti219/frameeyeosc](https://github.com/konsti219/frameeyeosc) (MIT).
 - This module listens on UDP 9021, validates the packet and writes gaze (atan2(x, -z)·4/π, clamped to ±1) and openness into VRCFT. Pupil diameter is pinned to 5 mm because the headset does not provide it.
 - Data only flows while the headset is worn and SteamVR is out of standby; the module holds the last values and logs when packets stop and resume.
 
@@ -58,35 +58,35 @@ MIT for this module. The shared-memory layout and OSC conventions are from frame
 ## Repository layout
 
 - `SteamFrameEyeModule.cs` / `.csproj` — the VRCFT module (PC side).
-- `headset/` — the headset side, a **SteamVR overlay application** (standard-library Python):
+- `headset/` — **FrameEye Bridge**, the headset side, a SteamVR dashboard application (standard-library Python; called Steam Frame Eye before 2026-09-26):
   - `frameeye_overlay.py` runs the sender in-process, registers itself with the Frame's SteamVR (`--install`), is auto-launched by SteamVR at startup and quits with it, and shows a dashboard tab with the live state (streaming / idle / no eye server, sample rate, targets, per-eye gaze and eyelids drawn as two eyes) and a settings form: **Sending to PC** (ON/OFF), the **PC address** text field (edited with the SteamVR keyboard) and **VRChat direct OSC (PC)** (ON/OFF). Settings persist in `~/frameeye/frameeye.conf.json` and take precedence over the manifest arguments.
   - `gl_texture.py` — the panel is streamed into a persistent OpenGL ES texture (EGL surfaceless, Mesa zink on Turnip) and handed over with `SetOverlayTexture`; `SetOverlayRaw` recreates the compositor texture on every call, which flickers, so it is only a 2 Hz fallback (`--no-gl` forces it).
   - `frameeye_osc.py` — the sender itself (`SenderRuntime`), also usable stand-alone from a shell or through the systemd unit `frameeye-osc.service`.
   - `openvr_min.py` (ctypes binding to `libopenvr_api.so`) and `bitmap_font.py` are shared with the FCAM overlay in the Baballonia `steamframe/overlay` folder.
-  - `install-overlay.sh <pc-ip>[:port]` copies everything to `~/frameeye`, retires the systemd unit if enabled, writes `frameeye.vrmanifest` with the sender options, registers it (`appconfig.json` + `vrappconfig/ottlabs.steamframeeye.vrappconfig` and, if SteamVR runs, `AddApplicationManifest` + `SetApplicationAutoLaunch`) and starts it through SteamVR.
+  - `install-overlay.sh <pc-ip>[:port]` copies everything to `~/frameeye`, retires the systemd unit if enabled, stops a running instance, writes `frameeye.vrmanifest` with the sender options, registers it (`appconfig.json` + `vrappconfig/ottlabs.steamframeeye.vrappconfig` and, if SteamVR runs, `AddApplicationManifest` + `SetApplicationAutoLaunch`) and starts it through SteamVR.
   - `tools/gen_icon.py` regenerates `icon.png`.
 - `lib/vrcft-5.4.5/` — compile-time reference assemblies (see NOTICE.md), `packaging/` — release packaging, `tools/send_test_packets.py` — loopback test for the module.
 
 ### Public mirrors on GitHub
 
-- `headset/` is published as [CyrusOtter/SteamFrameEye](https://github.com/CyrusOtter/SteamFrameEye), a `git subtree split` of this folder, so `headset/README.md`, `headset/LICENSE` and `headset/.gitignore` are that repository's root files. Re-publish after changes (remote `github-overlay`; the split is deterministic, so this fast-forwards):
+- `headset/` is published as [CyrusOtter/FrameEye-Bridge](https://github.com/CyrusOtter/FrameEye-Bridge) (formerly CyrusOtter/SteamFrameEye), a `git subtree split` of this folder, so `headset/README.md`, `headset/LICENSE` and `headset/.gitignore` are that repository's root files. Re-publish after changes (remote `github-overlay`; the split is deterministic, so this fast-forwards):
 
   ```
   git subtree split --prefix=headset -b overlay-split
   git push github-overlay overlay-split:main
   ```
 
-- The module is `Modules/SteamFrameEyeModule` on branch `feature/steamframe-eye-module` of the fork [CyrusOtter/VRCFaceTracking](https://github.com/CyrusOtter/VRCFaceTracking) (local clone `D:\Git\VRCFaceTracking`, remote `cyrusotter`). There it builds against the in-tree SDK/Core of the VRCFT 6.0 source line, or with `-p:VrcftDir=<VRCFT install>` against an installed release. It is a copy: port module changes there by hand.
+- The module is `Modules/SteamFrameEyeModule` on `master` of the fork [CyrusOtter/VRCFaceTracking](https://github.com/CyrusOtter/VRCFaceTracking) (local clone `D:\Git\VRCFaceTracking`, remote `cyrusotter`). There it builds against the in-tree SDK/Core of the VRCFT 6.0 source line, or with `-p:VrcftDir=<VRCFT install>` against an installed release. It is a copy: port module changes there by hand.
 
-### Headset install (SteamVR overlay)
+### Headset install (FrameEye Bridge)
 
 ```
-scp -r headset steamos@<headset-ip>:~/frameeye-src
-ssh steamos@<headset-ip> 'bash ~/frameeye-src/install-overlay.sh <pc-ip>:9021'
+scp -r headset steamos@<headset-ip>:
+ssh steamos@<headset-ip> 'bash ~/headset/install-overlay.sh <pc-ip>:9021'
 ssh steamos@<headset-ip> 'python3 ~/frameeye/frameeye_overlay.py --status'
 ```
 
-No root, `steamos-readonly` untouched. App key `ottlabs.steamframeeye`; `--uninstall` removes the registration and stops it. The tab appears in the SteamVR dashboard as "Steam Frame Eye". Log: `~/frameeye/frameeye_overlay.log`.
+No root, `steamos-readonly` untouched. App key `ottlabs.steamframeeye` (kept from the first name, so older installs update in place); `--uninstall` removes the registration and stops it. The tab appears in the SteamVR dashboard as "FrameEye Bridge". Log: `~/frameeye/frameeye_overlay.log`.
 
 The settings form in the tab (laser pointer, click anywhere in a row):
 
@@ -110,6 +110,7 @@ VRCFaceTracking 5.4.5 (Steam build, .NET 10) loaded the module in its sandbox pr
 - **"no packets for 1.5 s":** headset asleep, not worn, sender stopped, or a firewall between headset and PC. Check with `python tools\send_test_packets.py` (loopback) and with `ss -u` / the service journal on the headset.
 - **Port clash:** 9015 is used by Steam Link's face-tracking OSC; this module defaults to 9021. Change it in `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.json`.
 - **Dashboard tab flickers or its footer says `raw`:** the GL texture path did not come up (log line `GL texture path unavailable`); the overlay then falls back to `SetOverlayRaw` at 2 Hz. Expected footer on the Frame: `GL`, log line `GL texture path: zink Vulkan ... Turnip`.
+- **Tab empty, log says `SteamVR could not share the panel texture`:** vrcompositor could not create the panel image (on 2026-09-26 it had run out of IPC SharedObjectManager entries, used up by the FCAM overlay's SetOverlayFromFile loads). Any further vrclient call then segfaults the process, so the app freezes its SteamVR session and keeps only the eye sender running; it re-executes itself when vrserver/vrcompositor exit. Restart SteamVR to recover the compositor.
 - **Rows in the tab do not react, or the wrong row highlights:** the log records the first clicks as `click at x,y -> <row>`; if the resolved row is vertically mirrored, set `"mouse_origin_bottom": false` in `frameeye.conf.json` and restart. Every change is logged (`sending paused`, `PC address set to ...`, `direct VRChat OSC ...`).
 
 ## How VRCFaceTracking loads modules (5.4.x, from the decompiled binaries)
@@ -128,7 +129,7 @@ Consequences for packaging: a release zip must contain `module.json` + the DLL a
 ## Releases (Forgejo Actions)
 
 `.forgejo/workflows/release.yml` runs on the org `ubuntu-latest` runner: push a tag `vX.Y.Z` → `dotnet build` against the vendored reference assemblies in `lib/vrcft-5.4.5` → `packaging/package.sh` → Forgejo release with
-`SteamFrameEyeModule-X.Y.Z.zip` (module.json + DLL, VRCFT "install local module" format), `SteamFrameEye-headset-X.Y.Z.tar.gz` (sender + unit) and `module.json`. A manual dispatch without a tag only builds and packages. The `ModuleId` is fixed in `packaging/module-id.txt` so re-installs replace rather than duplicate the module.
+`SteamFrameEyeModule-X.Y.Z.zip` (module.json + DLL, VRCFT "install local module" format), `FrameEye-Bridge-X.Y.Z.tar.gz` (the headset app) and `module.json`. A manual dispatch without a tag only builds and packages. The `ModuleId` is fixed in `packaging/module-id.txt` so re-installs replace rather than duplicate the module.
 
 ## Install options
 

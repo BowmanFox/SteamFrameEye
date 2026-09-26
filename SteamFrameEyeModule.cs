@@ -77,8 +77,8 @@ public class SteamFrameEyeModule : ExtTrackingModule
         _rxThread = new Thread(ReceiveLoop) { IsBackground = true, Name = "SteamFrameEyeRx" };
         _rxThread.Start();
         Logger.LogInformation(
-            "SteamFrameEye: listening on UDP {Port}. On the headset run: frameeye_osc.py --raw <this-pc-ip>:{Port}",
-            _port, _port);
+            "SteamFrameEye: listening on UDP {Port}; on the headset, enter this PC's address in FrameEye Bridge",
+            _port);
         return (true, false);
     }
 

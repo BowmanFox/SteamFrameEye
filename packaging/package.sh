@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Package the built module the way VRCFaceTracking expects it:
 #   SteamFrameEyeModule-<version>.zip  = module.json + SteamFrameEyeModule.dll (+ README, LICENSE)
-#   SteamFrameEye-headset-<version>.tar.gz = headset side: SteamVR overlay app (sender + dashboard), installer, unit
+#   FrameEye-Bridge-<version>.tar.gz = headset side: FrameEye Bridge, the SteamVR dashboard app (sender, installer, unit)
 #
 # VRCFT installs such a zip through "install local module" (InstallLocalModule: extracts, requires
 # module.json, moves the folder to %APPDATA%\VRCFaceTracking\CustomLibs\<ModuleId>\ and loads
@@ -18,7 +18,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 MODULE_ID="$(tr -d '[:space:]' < "$HERE/module-id.txt")"
 ZIP="SteamFrameEyeModule-${VERSION}.zip"
-TGZ="SteamFrameEye-headset-${VERSION}.tar.gz"
+TGZ="FrameEye-Bridge-${VERSION}.tar.gz"
 
 [ -f "$ROOT/$DLL" ] || { echo "module dll not found: $ROOT/$DLL (run dotnet build -c Release first)" >&2; exit 1; }
 mkdir -p "$OUT"

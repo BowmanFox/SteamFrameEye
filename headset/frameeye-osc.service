@@ -1,5 +1,5 @@
 [Unit]
-Description=Steam Frame eye tracking -> VRCFT v2 OSC parameters (reads /dev/shm/eye-server.mmap)
+Description=FrameEye Bridge sender without SteamVR: Steam Frame eye tracking -> VRCFaceTracking (reads /dev/shm/eye-server.mmap)
 After=default.target
 
 [Service]

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-frameeye_overlay.py - the Steam Frame eye sender as a SteamVR overlay application.
+frameeye_overlay.py - FrameEye Bridge, a SteamVR dashboard application that forwards the Steam
+Frame's eye tracking to VRCFaceTracking on the PC.
 
 Runs frameeye_osc.SenderRuntime in-process (eye server shared memory -> PC over UDP) and shows
 its state as a dashboard tab: whether eye data is flowing, sample rate, the live per-eye gaze and
@@ -51,9 +52,11 @@ try:
 except Exception:  # pragma: no cover - platform without ctypes GL support
     gl_texture = None
 
+# The SteamVR identifiers keep the app's first name (Steam Frame Eye), so existing registrations and
+# the auto-launch setting carry over to the renamed app.
 APP_KEY = "ottlabs.steamframeeye"
 OVERLAY_KEY = "ottlabs.steamframeeye.dashboard"
-OVERLAY_NAME = "Steam Frame Eye"
+OVERLAY_NAME = "FrameEye Bridge"
 MANIFEST = os.path.join(HERE, "frameeye.vrmanifest")
 CONFIG = os.path.join(HERE, "frameeye.conf.json")
 ICON = os.path.join(HERE, "icon.png")
@@ -230,7 +233,7 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
     panel.fill(PANEL, *SETTINGS_CARD)
 
     # -- status card
-    panel.text(32, 28, "Steam Frame Eye", ACCENT, scale=2)
+    panel.text(32, 28, OVERLAY_NAME, ACCENT, scale=2)
     state = snapshot.get("state", "?")
     rate = snapshot.get("rate", 0.0)
     if state == "streaming" and not settings.enabled:
@@ -380,6 +383,9 @@ class OverlayApp:
         self.vr_error_logged = None
         self.upload_failures = 0
         self.upload_failed_since = None
+        self.vr_frozen = None         # reason, once calls into SteamVR had to stop (see freeze_vr)
+        self.frozen_pids = {}
+        self.restart_requested = False
         self.visible = False
         self.visible_checked = 0.0
         self.dirty = True
@@ -442,7 +448,7 @@ class OverlayApp:
         return True
 
     def disconnect_vr(self):
-        if self.session is None:
+        if self.session is None or self.vr_frozen:
             return
         try:
             if self.main_handle:
@@ -462,7 +468,7 @@ class OverlayApp:
 
     def redraw(self, snapshot=None):
         """Draws the panel and hands it to the compositor. Returns True when that succeeded."""
-        if self.session is None:
+        if self.session is None or self.vr_frozen:
             return False
         if snapshot is None:
             snapshot = self.runtime.snapshot()
@@ -476,7 +482,10 @@ class OverlayApp:
             else:
                 self.session.overlay.set_raw(self.main_handle, self.panel.buf, PANEL_W, PANEL_H)
         except Exception as e:  # OpenVRError, GlError
-            # Happens while the compositor is suspended (headset in standby); log once per episode.
+            if self.gl is not None and getattr(e, "code", None) == ovr.VROverlayError_InvalidTexture:
+                self.freeze_vr(str(e))
+                return False
+            # Other failures happen while the compositor is suspended (standby); log once per episode.
             self.upload_failures += 1
             if self.upload_failed_since is None:
                 self.upload_failed_since = time.monotonic()
@@ -488,6 +497,21 @@ class OverlayApp:
             self.upload_failed_since = None
         self.dirty = False
         return True
+
+    def freeze_vr(self, reason):
+        """Stops all calls into SteamVR's client library for the rest of this process.
+
+        When SteamVR cannot create the shared image for the panel texture (seen when vrcompositor ran out
+        of IPC SharedObjectManager entries), SetOverlayTexture fails with InvalidTexture and the next
+        vrclient call, about a second later, segfaults the process, eye sender included. So the app
+        leaves the SteamVR session alone from here on: eye data keeps flowing, the dashboard tab stays
+        empty, and once the SteamVR processes it was connected to have exited, the app re-executes
+        itself to reconnect with a fresh client library."""
+        self.vr_frozen = reason
+        self.frozen_pids = steamvr_pids()
+        log.error("SteamVR could not share the panel texture (%s). To keep eye data flowing the app stops "
+                  "talking to SteamVR until SteamVR restarts; the dashboard tab stays empty until then "
+                  "(watching %s)", reason, ", ".join("%s %d" % (c, p) for p, c in sorted(self.frozen_pids.items())))
 
     # -- controls
 
@@ -620,7 +644,7 @@ class OverlayApp:
     # -- main loop
 
     def run(self):
-        log.info("Steam Frame Eye overlay starting (pid %d), targets raw %s vrchat %s, sending %s",
+        log.info("FrameEye Bridge starting (pid %d), targets raw %s vrchat %s, sending %s",
                  os.getpid(), self.settings.raw, self.settings.target, "on" if self.settings.enabled else "paused")
         self.runtime.start()
         next_redraw = 0.0
@@ -628,6 +652,13 @@ class OverlayApp:
         last_key = None
         try:
             while not self.stop.is_set():
+                if self.vr_frozen:
+                    if self.frozen_pids and not all(pid_alive(p, c) for p, c in self.frozen_pids.items()):
+                        log.info("SteamVR processes exited; restarting to reconnect")
+                        self.restart_requested = True
+                        break
+                    self.stop.wait(2.0)
+                    continue
                 if self.session is None:
                     self.connect_vr()
                     self.stop.wait(0.5 if self.session is None else 0)
@@ -649,7 +680,7 @@ class OverlayApp:
                         if ((key != last_key or self.dirty) and now >= next_redraw) or now >= next_static:
                             last_key = key
                             ok = self.redraw(snap)
-                            next_static = now + REDRAW_STATIC_SECONDS
+                            next_static = now + (REDRAW_STATIC_SECONDS if ok else REDRAW_HIDDEN_SECONDS)
                             next_redraw = now + (interval if ok else REDRAW_HIDDEN_SECONDS)
                         sleep = 0.008
                 except ovr.OpenVRError as e:
@@ -658,9 +689,46 @@ class OverlayApp:
                     continue
                 self.stop.wait(sleep)
         finally:
+            if self.vr_frozen:
+                # No vrclient calls at all, not even VR_Shutdown, and no C++ exit handlers.
+                self.runtime.stop()
+                log.info("FrameEye Bridge stopped (SteamVR session left untouched)")
+                logging.shutdown()
+                if self.restart_requested:
+                    os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)] + sys.argv[1:])
+                os._exit(0)
             self.disconnect_vr()
             self.runtime.stop()
-            log.info("Steam Frame Eye overlay stopped")
+            log.info("FrameEye Bridge stopped")
+
+
+# ----------------------------------------------------------------------------- SteamVR processes
+
+def steamvr_pids():
+    """{pid: name} of the running vrserver and vrcompositor processes (Linux /proc)."""
+    found = {}
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return found
+    for entry in entries:
+        if entry.isdigit():
+            try:
+                with open("/proc/%s/comm" % entry) as fh:
+                    name = fh.read().strip()
+            except OSError:
+                continue
+            if name in ("vrserver", "vrcompositor"):
+                found[int(entry)] = name
+    return found
+
+
+def pid_alive(pid, name):
+    try:
+        with open("/proc/%d/comm" % pid) as fh:
+            return fh.read().strip() == name
+    except OSError:
+        return False
 
 
 # ----------------------------------------------------------------------------- single instance
@@ -735,8 +803,8 @@ def write_manifest(run_args):
             "image_path": "icon.png",
             "strings": {"en_us": {
                 "name": OVERLAY_NAME,
-                "description": "Sends the Steam Frame's eye tracking (per-eye gaze, eyelid openness) to the PC "
-                               "for VRCFaceTracking / VRChat",
+                "description": "Forwards the Steam Frame's eye tracking (per-eye gaze, eyelid openness) to "
+                               "VRCFaceTracking on the PC",
             }},
         }],
     }
@@ -852,7 +920,7 @@ def truncate_log(path, limit=1024 * 1024):
 
 def main(argv=None):
     parser = frameeye_osc.build_parser()
-    parser.description = "Steam Frame eye sender as a SteamVR overlay."
+    parser.description = "FrameEye Bridge: Steam Frame eye tracking for VRCFaceTracking, as a SteamVR dashboard app."
     parser.add_argument("--install", action="store_true",
                         help="write manifest + config with the given sender options, register with SteamVR, "
                              "enable auto-launch and start")
@@ -896,7 +964,7 @@ def main(argv=None):
 
     lock = acquire_lock()
     if lock is None:
-        log.info("another Steam Frame Eye overlay instance is running (pid %d); exiting", running_pid())
+        log.info("another FrameEye Bridge instance is running (pid %d); exiting", running_pid())
         return 0
 
     try:

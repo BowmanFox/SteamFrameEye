@@ -11,7 +11,7 @@ Reads the eye-tracking server's shared-memory object /dev/shm/eye-server.mmap
                       (use when no VRCFT is running)
 
 Runs stand-alone (CLI, e.g. from a systemd user unit) or embedded in
-frameeye_overlay.py, the SteamVR overlay application, through SenderRuntime.
+frameeye_overlay.py (FrameEye Bridge, the SteamVR dashboard app) through SenderRuntime.
 
 Data layout and the OSC contract follow konsti219/frameeyeosc (Rust, MIT License,
 Copyright (c) 2026 konsti219): https://github.com/konsti219/frameeyeosc

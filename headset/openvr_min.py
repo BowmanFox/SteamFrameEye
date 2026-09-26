@@ -20,6 +20,8 @@ VRApplication_Background = 3
 
 VROverlayInputMethod_None = 0
 VROverlayInputMethod_Mouse = 1
+VROverlayError_RequestFailed = 23
+VROverlayError_InvalidTexture = 24
 
 VROverlayFlags_VisibleInDashboard = 32768
 VROverlayFlags_MakeOverlaysInteractiveIfVisible = 65536
@@ -69,7 +71,11 @@ LIBRARY_CANDIDATES = (
 
 
 class OpenVRError(Exception):
-    pass
+    """code: the EVROverlayError / EVRApplicationError value when the error came from a call."""
+
+    def __init__(self, message, code=None):
+        super().__init__(message)
+        self.code = code
 
 
 class VREvent_t(ctypes.Structure):
@@ -228,7 +234,7 @@ class Overlay:
         self._is_dashboard_visible = table.fn(68, c_bool)
         self._is_active_dashboard_overlay = table.fn(69, c_bool, c_uint64)
         self._show_dashboard = table.fn(72, None, c_char_p)
-        # additions for the Steam Frame Eye overlay (indices from openvr.h 2.15.6, IVROverlay_028)
+        # additions for FrameEye Bridge (indices from openvr.h 2.15.6, IVROverlay_028)
         self._set_sort_order = table.fn(20, c_int, c_uint64, c_uint32)
         self._set_texture_bounds = table.fn(30, c_int, c_uint64, POINTER(VRTextureBounds_t))
         self._set_texture = table.fn(60, c_int, c_uint64, POINTER(Texture_t))
@@ -243,7 +249,7 @@ class Overlay:
 
     def _check(self, code, what):
         if code != 0:
-            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code))
+            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code), code)
 
     def find_overlay(self, key):
         handle = c_uint64(0)
@@ -371,7 +377,7 @@ class Applications:
 
     def _check(self, code, what):
         if code != 0:
-            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code))
+            raise OpenVRError("%s failed: %s (%d)" % (what, self.error_name(code), code), code)
 
     def add_manifest(self, path, temporary=False):
         self._check(self._add_manifest(os.fsencode(os.path.abspath(path)), temporary), "AddApplicationManifest")

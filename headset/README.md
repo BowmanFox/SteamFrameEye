@@ -1,20 +1,20 @@
-# Steam Frame Eye
+# FrameEye Bridge
 
-A SteamVR dashboard application for the Valve Steam Frame that forwards the headset's built-in eye tracking to a PC: per-eye gaze **and eyelid openness**, which the public OpenXR and OpenVR APIs do not expose.
+A SteamVR dashboard application for the Valve Steam Frame that forwards the headset's built-in eye tracking to VRCFaceTracking on a PC: per-eye gaze **and eyelid openness**, which the public OpenXR and OpenVR APIs do not expose.
 
-The receiving side is a VRCFaceTracking module, which lives in [CyrusOtter/VRCFaceTracking](https://github.com/CyrusOtter/VRCFaceTracking/tree/feature/steamframe-eye-module/Modules/SteamFrameEyeModule) on the branch `feature/steamframe-eye-module`. As an alternative, the app can send the eye parameters straight to VRChat on the PC.
+The receiving side is the Steam Frame Eye module of VRCFaceTracking, in [CyrusOtter/VRCFaceTracking](https://github.com/CyrusOtter/VRCFaceTracking) under [`Modules/SteamFrameEyeModule`](https://github.com/CyrusOtter/VRCFaceTracking/tree/master/Modules/SteamFrameEyeModule). As an alternative, the app can send the eye parameters straight to VRChat on the PC.
 
 ## How it works
 
 ```
-Steam Frame (headset)                                            PC
-/dev/shm/eye-server.mmap --> frameeye_overlay.py --UDP 9021--> SteamFrameEyeModule in VRCFaceTracking
-(eye-tracking service)       (SteamVR dashboard app)
-                                               \--OSC 9000--> VRChat (optional, without VRCFaceTracking)
+Steam Frame (headset)                                        PC
+/dev/shm/eye-server.mmap --> FrameEye Bridge ---UDP 9021---> Steam Frame Eye module in VRCFaceTracking
+(eye-tracking service)       (frameeye_overlay.py)
+                                            \---OSC 9000---> VRChat (optional, without VRCFaceTracking)
 ```
 
 - The headset's eye-tracking service publishes every sample (90 Hz) in the shared-memory object `/dev/shm/eye-server.mmap`: per-eye gaze direction, fixation point and eyelid openness. The memory layout and the gaze mapping follow [konsti219/frameeyeosc](https://github.com/konsti219/frameeyeosc) (MIT).
-- `frameeye_overlay.py` waits on the service's sequence counter and sends one 96-byte `SFEY` UDP packet per sample to the PC. It also shows a tab in the SteamVR dashboard with the live state and the settings.
+- FrameEye Bridge (`frameeye_overlay.py`) waits on the service's sequence counter and sends one 96-byte `SFEY` UDP packet per sample to the PC. It also shows a tab in the SteamVR dashboard with the live state and the settings.
 - Everything runs as the `steamos` user from the home directory. No root is needed and `steamos-readonly` stays enabled.
 - Data only flows while the headset is worn and SteamVR is out of standby.
 
@@ -25,20 +25,22 @@ Tested on a Steam Frame with SteamVR 2.17.10 and the stock Python 3. The eye-ser
 Copy this repository to the headset and run the installer with the PC's address. From the folder that contains the clone:
 
 ```
-scp -r SteamFrameEye steamos@<headset-ip>:~/frameeye-src
-ssh steamos@<headset-ip> 'bash ~/frameeye-src/install-overlay.sh <pc-ip>:9021'
+scp -r FrameEye-Bridge steamos@<headset-ip>:
+ssh steamos@<headset-ip> 'bash ~/FrameEye-Bridge/install-overlay.sh <pc-ip>:9021'
 ssh steamos@<headset-ip> 'python3 ~/frameeye/frameeye_overlay.py --status'
 ```
 
-The installer copies the app to `~/frameeye`, disables the systemd unit variant if it is enabled, and runs `frameeye_overlay.py --install`. That writes `frameeye.vrmanifest` and `frameeye.conf.json`, registers the app with SteamVR (`~/.config/openvr/config/appconfig.json` and `vrappconfig/ottlabs.steamframeeye.vrappconfig`), enables auto-launch and starts it. From then on SteamVR starts the app with itself and asks it to quit at shutdown.
+The installer copies the app to `~/frameeye`, disables the systemd unit variant if it is enabled, stops a running instance and runs `frameeye_overlay.py --install`. That writes `frameeye.vrmanifest` and `frameeye.conf.json`, registers the app with SteamVR (`~/.config/openvr/config/appconfig.json` and `vrappconfig/ottlabs.steamframeeye.vrappconfig`), enables auto-launch and starts it. From then on SteamVR starts the app with itself and asks it to quit at shutdown. To update, copy the new version over and run the installer again.
 
 `python3 ~/frameeye/frameeye_overlay.py --uninstall` removes the registration and stops the app. The log is `~/frameeye/frameeye_overlay.log`.
 
-On the PC, install the VRCFaceTracking module and allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
+On the PC, install the Steam Frame Eye module in VRCFaceTracking (see its README) and allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
+
+The SteamVR app key is `ottlabs.steamframeeye`, from the app's first name, so installs made before the rename update in place.
 
 ## The dashboard tab
 
-The tab is called "Steam Frame Eye". The upper card shows whether eye data is streaming, the sample rate and counters, and both eyes drawn live with gaze and eyelids. The footer shows the SteamVR version and `GL` for the texture path in use.
+The tab is called "FrameEye Bridge". The upper card shows whether eye data is streaming, the sample rate and counters, and both eyes drawn live with gaze and eyelids. The footer shows the SteamVR version and `GL` for the texture path in use.
 
 The settings card is used with the laser pointer. A click anywhere in a row acts on it.
 
@@ -104,6 +106,7 @@ python3 frameeye_osc.py --raw <pc-ip>:9021 [--target <pc-ip>:9000] [--verbose]
 ## Known issues
 
 - **Do not use `--no-gl`.** The panel is normally streamed into one persistent OpenGL ES texture (`gl_texture.py`, EGL surfaceless on Mesa zink) and handed to SteamVR with `SetOverlayTexture`. With `--no-gl`, or if the GL setup fails, the app falls back to `SetOverlayRaw`. On the Steam Frame with SteamVR 2.17.10, vrcompositor has been observed to crash with SIGBUS shortly after a client that used `SetOverlayRaw` exits, and gamescope can then restart in a loop. If the footer shows `raw` instead of `GL`, check the log for `GL texture path unavailable`.
+- **Empty dashboard tab, log says `SteamVR could not share the panel texture`.** SteamVR could not create the image the panel is shown with. On the Steam Frame this happened once the compositor had run out of shared-resource slots (`Ran out of IPC SharedObjectManager entries` in the system journal), used up by another overlay that reloads its image from a file. SteamVR's client library crashes on its next call after that error, so the app stops talking to SteamVR: eye data keeps flowing, the tab stays empty, and the app reconnects by itself after SteamVR has been restarted.
 - The eye-server layout is not a public interface. If a SteamOS update changes it, the tab stays on "waiting for the eye tracking server" or shows implausible values.
 
 ## Files

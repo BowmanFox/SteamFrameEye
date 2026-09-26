@@ -2,7 +2,7 @@
 #
 # Tag-driven: pushing vX.Y.Z builds the module at that version and publishes
 #   SteamFrameEyeModule-X.Y.Z.zip     (module.json + DLL, VRCFT "install local module" format)
-#   SteamFrameEye-headset-X.Y.Z.tar.gz (headset-side sender + systemd unit)
+#   FrameEye-Bridge-X.Y.Z.tar.gz       (FrameEye Bridge, the headset app)
 #   module.json                        (for reference / manual installs)
 # A manual dispatch without a tag only builds and packages (CI check), no release.
 #
@@ -109,11 +109,10 @@ jobs:
             `%APPDATA%\VRCFaceTracking\CustomLibs\58be7fa6-4102-44ab-adba-25021d3af8b7\`.
             The module listens on UDP 9021.
 
-            **Headset:** unpack `SteamFrameEye-headset-${{ steps.tag.outputs.version }}.tar.gz`
-            to `/home/steamos/frameeye/`, put the unit in `~/.config/systemd/user/`, set the
-            `--raw` target to your PC's IP, then
-            `XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable --now frameeye-osc`.
+            **Headset:** FrameEye Bridge, a SteamVR dashboard app. Unpack
+            `FrameEye-Bridge-${{ steps.tag.outputs.version }}.tar.gz` into `~/FrameEye-Bridge` on the
+            headset and run `bash ~/FrameEye-Bridge/install-overlay.sh <pc-ip>:9021` there.
           files: |
             dist/SteamFrameEyeModule-${{ steps.tag.outputs.version }}.zip
-            dist/SteamFrameEye-headset-${{ steps.tag.outputs.version }}.tar.gz
+            dist/FrameEye-Bridge-${{ steps.tag.outputs.version }}.tar.gz
             dist/module.json
