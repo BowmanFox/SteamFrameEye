@@ -4,7 +4,7 @@ Steam Frame eye tracking for VRCFaceTracking: per-eye gaze **and eyelid openness
 
 The project has two parts:
 
-- **Headset app** in [`headset/`](headset/README.md): FrameEye Bridge, a SteamVR dashboard app that runs on the Steam Frame and sends the eye data to the PC. It was called Steam Frame Eye before 2026-09-26.
+- **Headset app** in [`headset/`](headset/README.md): FrameEye Bridge, a SteamVR dashboard app that runs on the Steam Frame and sends the eye data to the PC.
 - **VRCFaceTracking module** in this folder: `SteamFrameEyeModule`, which receives the data on the PC, cleans it up and feeds it into VRCFaceTracking the way the Steam Link module feeds a Quest Pro's. It is an ordinary external module that builds against VRCFaceTracking's released assemblies, so no VRCFaceTracking source checkout is needed.
 
 ## How it works
