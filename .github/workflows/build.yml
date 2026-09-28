@@ -1,0 +1,101 @@
+# GitHub Actions: build the VRCFaceTracking module and package the headset app.
+#
+# Every push and pull request: build the module against the VRCFT 5.4.5 assemblies stored in
+# lib/vrcft-5.4.5 (compile-time only, so no VRCFaceTracking install is needed), check that the headset
+# and training Python files compile, and package both parts. The packages are kept as workflow artifacts.
+#
+# Pushing a tag vX.Y.Z also publishes a GitHub release with
+#   SteamFrameEyeModule-X.Y.Z.zip     (module.json + DLL, VRCFaceTracking "install local module" format)
+#   FrameEye-Bridge-X.Y.Z.tar.gz      (FrameEye Bridge, the headset app)
+#   module.json                       (for reference / manual installs)
+#
+# The Forgejo mirror builds its own releases with .forgejo/workflows/release.yml; Forgejo ignores this
+# directory because that one exists.
+
+name: Build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+            version="${tag#v}"
+          else
+            tag=""
+            version="0.0.0-ci.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag='$tag' version='$version'"
+
+      - name: Build the module
+        run: |
+          dotnet build SteamFrameEyeModule.csproj -c Release \
+            -p:VrcftDir="$PWD/lib/vrcft-5.4.5" \
+            -p:Version="${{ steps.ver.outputs.version }}"
+          ls -la bin/Release/net10.0/
+
+      - name: Check the Python files compile
+        run: |
+          python3 -m py_compile headset/*.py headset/tools/*.py training/*.py
+          bash -n headset/install-overlay.sh headset/frameeye_overlay.sh
+
+      - name: Package
+        run: |
+          chmod +x packaging/package.sh
+          TAG="${{ steps.ver.outputs.tag }}"
+          [ -n "$TAG" ] || TAG="v${{ steps.ver.outputs.version }}"
+          packaging/package.sh "${{ steps.ver.outputs.version }}" \
+            "https://github.com/${{ github.repository }}/releases/download/${TAG}" \
+            "https://github.com/${{ github.repository }}"
+
+      - name: Keep the packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: FrameEye-Bridge-${{ steps.ver.outputs.version }}
+          path: dist/
+
+      - name: Publish the release
+        if: steps.ver.outputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: FrameEye Bridge ${{ steps.ver.outputs.version }}
+          body: |
+            Steam Frame eye tracking for VRCFaceTracking: per-eye gaze and eyelid openness.
+
+            **PC:** in VRCFaceTracking use "install local module" with
+            `SteamFrameEyeModule-${{ steps.ver.outputs.version }}.zip`, or unzip it into
+            `%APPDATA%\VRCFaceTracking\CustomLibs\58be7fa6-4102-44ab-adba-25021d3af8b7\`.
+            The module listens on UDP 9021 and needs VRCFaceTracking 5.4.x.
+
+            **Headset:** unpack `FrameEye-Bridge-${{ steps.ver.outputs.version }}.tar.gz` into
+            `~/FrameEye-Bridge` on the Steam Frame and run `bash ~/FrameEye-Bridge/install-overlay.sh <pc-ip>:9021`.
+          files: |
+            dist/SteamFrameEyeModule-${{ steps.ver.outputs.version }}.zip
+            dist/FrameEye-Bridge-${{ steps.ver.outputs.version }}.tar.gz
+            dist/module.json
