@@ -61,7 +61,9 @@ jobs:
 
       - name: Check the Python files compile
         run: |
-          python3 -m py_compile headset/*.py headset/tools/*.py training/*.py
+          dirs="headset"
+          [ -d training ] && dirs="$dirs training"
+          python3 -m py_compile $(find $dirs -name '*.py' -not -path '*/__pycache__/*')
           bash -n headset/install-overlay.sh headset/frameeye_overlay.sh
 
       - name: Package
