@@ -45,8 +45,10 @@ jobs:
         with:
           python-version: '3.x'
       - name: Build and package using native Windows tools
-        shell: ${{ matrix.powershell }}
-        run: ./build.ps1 -VrcftDir ./lib/vrcft-5.4.5
+        shell: pwsh
+        run: |
+          & $env:FRAMEEYE_POWERSHELL -NoProfile -ExecutionPolicy Bypass -File ./build.ps1 -VrcftDir ./lib/vrcft-5.4.5
+          exit $LASTEXITCODE
       - name: Verify packaging and SSH installer behavior
         run: python -m unittest discover -s tools/tests -v
       - name: Check gaze smoothing behavior
