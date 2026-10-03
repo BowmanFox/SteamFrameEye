@@ -47,7 +47,7 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
 PY
 fi
 
-tar czf "$OUT/$TGZ" -C "$ROOT/headset" --exclude=__pycache__ --exclude="*.pyc" --exclude="*.log" --exclude="*.lock" --exclude="frameeye.vrmanifest" .
+tar czf "$OUT/$TGZ" -C "$ROOT/headset" -T "$ROOT/headset/release-files.txt"
 cp "$STAGE/module.json" "$OUT/module.json"
 echo "packaged:"; ls -la "$OUT"
 echo "module.json:"; cat "$OUT/module.json"

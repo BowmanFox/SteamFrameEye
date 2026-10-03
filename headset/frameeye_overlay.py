@@ -63,7 +63,7 @@ ICON = os.path.join(HERE, "icon.png")
 DEFAULT_LOG = os.path.join(HERE, "frameeye_overlay.log")
 LOCK = os.path.join(HERE, "frameeye_overlay.lock")
 
-PANEL_W, PANEL_H = 640, 568
+PANEL_W, PANEL_H = 640, 628
 VR_RETRY_SECONDS = 5.0
 REDRAW_SECONDS = 0.04         # GL path, tab visible: up to 25 Hz, driven by new samples
 REDRAW_SECONDS_RAW = 0.5      # SetOverlayRaw fallback (each upload blanks a frame)
@@ -188,10 +188,12 @@ SETTINGS_CARD = (16, 364, PANEL_W - 16, PANEL_H - 16)
 ROW_SENDING = (32, 376, 608, 428)      # whole row is clickable
 ROW_ADDRESS = (32, 436, 608, 480)
 ROW_VRCHAT = (32, 488, 608, 540)
+ROW_SMOOTHING = (32, 548, 608, 600)
 TOGGLE_X0, TOGGLE_X1 = 496, 608
 FIELD_X0, FIELD_X1 = 200, 608
 CAPTION_CHARS = (TOGGLE_X0 - 8 - 32) // CELL_W
-CONTROLS = (("sending", ROW_SENDING), ("address", ROW_ADDRESS), ("vrchat", ROW_VRCHAT))
+CONTROLS = (("sending", ROW_SENDING), ("address", ROW_ADDRESS), ("vrchat", ROW_VRCHAT),
+            ("smoothing", ROW_SMOOTHING))
 
 
 def control_at(x, y):
@@ -298,6 +300,11 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
     panel.text(32, y0 + 27, caption[:CAPTION_CHARS], DIM)
     draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, bool(settings.target), hot == "vrchat")
 
+    x0, y0, x1, y1 = ROW_SMOOTHING
+    panel.text(32, y0 + 4, "Direct OSC smoothing", TEXT)
+    panel.text(32, y0 + 27, "Steadier gaze and eyelids" if settings.target else "Used when direct OSC is on", DIM)
+    draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, settings.osc_smoothing, hot == "smoothing")
+
 
 # ----------------------------------------------------------------------------- settings
 
@@ -308,6 +315,7 @@ class Settings:
         self.raw = [r for r in args.raw if r and r != "none"]
         self.target = args.target if args.target and args.target != "none" else None
         self.enabled = True
+        self.osc_smoothing = args.osc_smoothing
         self.mouse_origin_bottom = True   # OpenVR mouse events are in GL space (0,0 = bottom left)
         cfg = load_config()
         if isinstance(cfg.get("raw"), list):
@@ -316,17 +324,21 @@ class Settings:
             self.target = cfg["target"] or None
         if "enabled" in cfg:
             self.enabled = bool(cfg["enabled"])
+        if isinstance(cfg.get("osc_smoothing"), bool):
+            self.osc_smoothing = cfg["osc_smoothing"]
         if "mouse_origin_bottom" in cfg:
             self.mouse_origin_bottom = bool(cfg["mouse_origin_bottom"])
 
     def save(self):
         cfg = load_config()
-        cfg.update({"raw": self.raw, "target": self.target, "enabled": self.enabled})
+        cfg.update({"raw": self.raw, "target": self.target, "enabled": self.enabled,
+                    "osc_smoothing": self.osc_smoothing})
         save_config(cfg)
 
     def apply(self, runtime):
         runtime.set_targets(raw=self.raw, osc=self.target)
         runtime.enabled = self.enabled
+        runtime.osc_smoothing = self.osc_smoothing
 
     def pc_host(self):
         return self.raw[0].rsplit(":", 1)[0] if self.raw else None
@@ -534,6 +546,12 @@ class OverlayApp:
         self.settings.save()
         log.info("direct VRChat OSC %s", self.settings.target or "off")
 
+    def toggle_smoothing(self):
+        self.settings.osc_smoothing = not self.settings.osc_smoothing
+        self.runtime.osc_smoothing = self.settings.osc_smoothing
+        self.settings.save()
+        log.info("direct OSC smoothing %s", "on" if self.settings.osc_smoothing else "off")
+
     def edit_address(self):
         existing = self.settings.raw[0] if self.settings.raw else ""
         try:
@@ -597,6 +615,8 @@ class OverlayApp:
             self.toggle_vrchat()
         elif cid == "address":
             self.edit_address()
+        elif cid == "smoothing":
+            self.toggle_smoothing()
         self.dirty = True
 
     def handle_events(self):
@@ -646,6 +666,8 @@ class OverlayApp:
     def run(self):
         log.info("FrameEye Bridge starting (pid %d), targets raw %s vrchat %s, sending %s",
                  os.getpid(), self.settings.raw, self.settings.target, "on" if self.settings.enabled else "paused")
+        log.info("direct OSC smoothing %s (gaze median + adaptive filter, eyelid smoothing)",
+                 "on" if self.settings.osc_smoothing else "off")
         self.runtime.start()
         next_redraw = 0.0
         next_static = 0.0

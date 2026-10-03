@@ -1,0 +1,16 @@
+LICENSE
+README.md
+bitmap_font.py
+eye_smoothing.py
+frameeye-osc.service
+frameeye_osc.py
+frameeye_overlay.py
+frameeye_overlay.sh
+gl_texture.py
+icon.png
+install-overlay.sh
+install-overlay.ps1
+openvr_min.py
+release-files.txt
+tools/gen_icon.py
+tools/record_eyes.py

@@ -1,5 +1,7 @@
 # FrameEye Bridge
 
+This standalone fork adds native Windows build/package/install scripts and improved eye smoothing, including direct VRChat OSC. It preserves the history and licenses of `CyrusOtter/SteamFrameEye`. The original GitHub repository was unavailable when this fork was published, so GitHub does not link it as a fork.
+
 Steam Frame eye tracking for VRCFaceTracking: per-eye gaze **and eyelid openness** from the Valve Steam Frame's built-in eye tracking, which the public OpenXR and OpenVR APIs do not expose.
 
 The project has two parts:
@@ -21,9 +23,38 @@ Steam Frame (headset)                                        PC
 
 ## Quick start
 
-1. **PC:** build the module and install it into VRCFaceTracking (below). Allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
+1. **Windows PC:** run `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`, then install `dist\SteamFrameEyeModule-0.5.2.zip` with VRCFaceTracking's "install local module". Allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
 2. **Headset:** install FrameEye Bridge with the PC's address, as described in [headset/README.md](headset/README.md).
 3. Start VRCFaceTracking and put the headset on. The eyelid calibration learns within about a minute of normal blinking and is kept for the next session.
+
+### Windows scripts
+
+Windows 10/11, Windows PowerShell 5.1 or PowerShell 7, and the .NET 10 SDK are sufficient to build and package. Packaging uses Windows' included `tar.exe` and .NET's ZIP support. Bash, WSL, and Python are not needed on the PC for these steps.
+
+From the repository folder:
+
+```powershell
+# Build and create both release archives in dist\.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+
+# Install the headset app over SSH; replace both example addresses.
+powershell -NoProfile -ExecutionPolicy Bypass -File .\headset\install-overlay.ps1 `
+    -HeadsetHost 192.168.1.50 -PcAddress 192.168.1.10
+```
+
+The headset installer needs Windows OpenSSH Client (`ssh.exe` and `scp.exe`) and SSH access to the Steam Frame. It uploads the app, runs the headset's existing installer and prints its status. The eye-data reader and dashboard still run on the Steam Frame: their shared-memory source and Linux SteamVR libraries are on that device. `frameeye_overlay.sh` remains its SteamVR launcher; it is not a Windows PC program.
+
+`build.ps1` accepts `-Version`, `-VrcftDir`, `-OutDir`, `-DownloadUrlBase` and `-PageUrl`. Relative output paths are based on the repository folder, so calling the script from another directory works too. Use `-VrcftDir 'D:\SteamLibrary\steamapps\common\VRCFaceTracking'` to select another VRCFaceTracking installation.
+
+To package an already built DLL:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\package.ps1 `
+    -Version 0.5.2 -DownloadUrlBase 'https://example.com/releases/download/v0.5.2' `
+    -PageUrl 'https://example.com/project'
+```
+
+Omit the URL arguments for a local package (`IsLocal: true`, no download URL). The outputs are `SteamFrameEyeModule-<version>.zip`, `FrameEye-Bridge-<version>.tar.gz` and `module.json`, matching the Linux packaging layout. `-DllPath` and `-OutDir` accept absolute paths or paths relative to the repository. The headset archive includes the Windows installer and excludes personal settings, logs and generated files.
 
 ## Steam Frame compared with a Quest Pro
 
@@ -43,7 +74,7 @@ The module writes its values the way the Steam Link module does for a Quest Pro:
 
 ## Smoothing and calibration
 
-Measured on an eight-minute recording from a Steam Frame (see *Tuning with a recording*):
+The following measurements are from the original v0.5.0 processing on an eight-minute Steam Frame recording (see *Tuning with a recording*). They are historical results, not measurements of the newer gaze filter:
 
 | | Raw eye-server values | After the module |
 |---|---|---|
@@ -65,10 +96,14 @@ What the module does with every sample:
   - A One Euro filter smooths without delaying blinks, then snap zones map the bottom 15 % to fully closed and the top 10 % to fully open.
   - Blink sync closes the second eye when one eye is fully closed and the other is mostly closed. Real winks, where the other eye stays open, are left alone.
   - A closed eye is held closed for 80 ms so short blinks survive VRChat's slower network sync for other players.
-- **Gaze:** both eyes are averaged into one gaze (like a Quest Pro via Steam Link) and smoothed with a One Euro filter tuned to let fast eye movements through. Only eyes that are clearly open and tracked steer: during a wink the open eye steers both, during blinks and with both eyes closed the gaze holds.
+- **Gaze:** both eyes are averaged into one gaze (like a Quest Pro via Steam Link). Since v0.5.2, a three-sample median rejects isolated spikes before a One Euro filter (minimum cutoff 0.8 Hz, beta 5). The median delays a sustained movement by one sample, about 11 ms at 90 Hz. Only eyes that are clearly open and tracked steer: during a wink the open eye steers both, during blinks and with both eyes closed the gaze holds. Median history clears when the contributing eyes change, and all filters reset after a clock reset or reconnect.
 - **Persistence:** the learned levels are saved to `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.calibration.json` every minute and when VRCFaceTracking closes, but only after about 30 s of reliable data and a few blinks per eye. A saved file with implausible values is ignored.
 
 VRCFaceTracking's own "Data Filter" mutation smooths every value again with fixed settings; leave it off for the eyes. The module logs its calibration every five minutes, for example `lids left closed 0.19 open 0.95, right closed 0.39 open 1.00 (174/116 blinks); gaze held 7.8 %, low-confidence samples (closed eyes or poor fit) 2.4 %`.
+
+**Direct VRChat OSC** also has gaze and eyelid smoothing in the headset app, enabled by default. Use its **Direct OSC smoothing** dashboard switch to change it; the choice is saved. The sender's binary SFEY feed remains raw so the VRCFaceTracking module applies its own processing once. Direct OSC does not include the module's learned eyelid calibration. See [headset/README.md](headset/README.md).
+
+Run `dotnet run --project tools/SmoothingChecks -c Release` and `python -m unittest discover -s tools/tests -p test_osc_smoothing.py -v` for deterministic smoothing, blink, reconnect and actual loopback OSC checks. These synthetic checks do not establish how it feels on a wearer.
 
 ## The VRCFaceTracking module
 
@@ -86,7 +121,7 @@ The module only uses `ExtTrackingModule` and the `UnifiedTracking` eye fields, w
 
 ### Install
 
-- **Module zip:** `packaging/package.sh <version> <download-url-base> <page-url>` builds `SteamFrameEyeModule-<version>.zip` with `module.json` and the DLL. Install it with VRCFaceTracking's "install local module", or unzip it into `%APPDATA%\VRCFaceTracking\CustomLibs\<ModuleId>\`. The `ModuleId` is fixed in `packaging/module-id.txt`, so a reinstall replaces the module instead of adding a second copy.
+- **Module zip:** on Windows, `build.ps1` builds and packages, or `packaging/package.ps1 -Version <version>` packages a previously built DLL. On Linux, use `packaging/package.sh <version> <download-url-base> <page-url>`. Install the resulting zip with VRCFaceTracking's "install local module", or unzip it into `%APPDATA%\VRCFaceTracking\CustomLibs\<ModuleId>\`. The `ModuleId` is fixed in `packaging/module-id.txt`, so a reinstall replaces the module instead of adding a second copy.
 - **Single DLL:** copy `SteamFrameEyeModule.dll` into `%APPDATA%\VRCFaceTracking\CustomLibs\` and restart VRCFaceTracking.
 
 Do not keep both variants installed.
@@ -106,7 +141,8 @@ All settings are optional, in `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.jso
 | `gaze_scale` | 1.0 | multiplier on the gaze angle in radians |
 | `gaze_offset_x_deg`, `gaze_offset_y_deg` | 0 | constant gaze correction in degrees |
 | `smoothing` | true | One Euro filters for gaze and eyelids |
-| `gaze_min_cutoff`, `gaze_beta` | 1.0, 8.0 | gaze filter: lower cutoff smooths more at rest, higher beta follows fast movements sooner |
+| `gaze_median_filter` | true | reject single-sample gaze spikes before smoothing; set false to skip the one-sample median delay |
+| `gaze_min_cutoff`, `gaze_beta` | 0.8, 5.0 | gaze filter: lower cutoff smooths more at rest, higher beta follows fast movements sooner |
 | `lid_min_cutoff`, `lid_beta` | 4.0, 1.0 | eyelid filter |
 | `calibration` | `auto` | `auto`: learn per eye; `fixed`: use `left_closed`, `left_open`, `right_closed`, `right_open`; `off`: raw values |
 | `lid_gaze_compensation` | true | learn the open level per vertical gaze band |
@@ -186,11 +222,13 @@ A module zip must therefore contain `module.json` and the DLL at its root, and t
 - `headset/`: FrameEye Bridge, the headset app (standard-library Python). See [headset/README.md](headset/README.md). `headset/tools/record_eyes.py` records raw eye data.
 - `tools/ReplayProbe/`: replays a recording through `EyeProcessing.cs` and prints before/after statistics.
 - `lib/vrcft-5.4.5/`: compile-time reference assemblies (see its `NOTICE.md`).
-- `packaging/`: release packaging (`module.json` template, fixed `ModuleId`, `package.sh`).
+- `build.ps1`: Windows build and packaging entry point.
+- `packaging/`: release packaging (`module.json` template, fixed `ModuleId`, native PowerShell `package.ps1` and Linux `package.sh`).
+- `headset/install-overlay.ps1`: install the headset app from Windows over SSH; `headset/release-files.txt` lists the headset distribution files shared by both packagers.
 - `tools/send_test_packets.py`: loopback test sender for the module.
 - `.forgejo/workflows/release.yml`: release workflow of the primary Forgejo repository. A tag `vX.Y.Z` builds the module against `lib/vrcft-5.4.5` and publishes `SteamFrameEyeModule-X.Y.Z.zip`, `FrameEye-Bridge-X.Y.Z.tar.gz` (the headset app) and `module.json` as a release.
 
-This GitHub repository is a mirror of that Forgejo repository (maintainers: remote `github`, `git push github main --tags`).
+The original project used a GitHub mirror of its Forgejo repository. This fork is maintained separately at [BowmanFox/SteamFrameEye](https://github.com/BowmanFox/SteamFrameEye); its GitHub Actions workflow builds and packages releases.
 
 ## License
 

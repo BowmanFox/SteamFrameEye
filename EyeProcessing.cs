@@ -30,7 +30,8 @@ public sealed class EyeSettings
     public float GazeScale = 1f;           // multiplier on the gaze angle in radians
     public float GazeOffsetXDeg, GazeOffsetYDeg;
     public bool Smoothing = true;
-    public float GazeMinCutoff = 1.0f, GazeBeta = 8.0f, GazeDCutoff = 1.0f;
+    public bool GazeMedianFilter = true;  // reject isolated gaze spikes before the adaptive filter
+    public float GazeMinCutoff = 0.8f, GazeBeta = 5.0f, GazeDCutoff = 1.0f;
     public float LidMinCutoff = 4.0f, LidBeta = 1.0f, LidDCutoff = 1.0f;
     public string Calibration = "auto";    // "auto" (learn per eye), "fixed" (use the levels below), "off" (raw values)
     public float LeftClosed = 0.0f, LeftOpen = 0.9f, RightClosed = 0.0f, RightOpen = 0.9f;
@@ -73,6 +74,7 @@ public sealed class EyeSettings
             s.GazeOffsetXDeg = Float("gaze_offset_x_deg", s.GazeOffsetXDeg);
             s.GazeOffsetYDeg = Float("gaze_offset_y_deg", s.GazeOffsetYDeg);
             s.Smoothing = Bool("smoothing", s.Smoothing);
+            s.GazeMedianFilter = Bool("gaze_median_filter", s.GazeMedianFilter);
             s.GazeMinCutoff = MathF.Max(0.01f, Float("gaze_min_cutoff", s.GazeMinCutoff));
             s.GazeBeta = MathF.Max(0f, Float("gaze_beta", s.GazeBeta));
             s.LidMinCutoff = MathF.Max(0.01f, Float("lid_min_cutoff", s.LidMinCutoff));
@@ -138,6 +140,52 @@ public sealed class OneEuro
         var tau = 1f / (2f * MathF.PI * cutoff);
         return 1f / (1f + tau / dt);
     }
+}
+
+/// <summary>Three-sample gaze median followed by adaptive smoothing. A sustained movement passes
+/// the median after one sample; an isolated spike never reaches the adaptive filter.</summary>
+public sealed class GazeSmoother
+{
+    private readonly OneEuro _x, _y;
+    private readonly bool _median;
+    private bool _haveHistory;
+    private (float X, float Y) _previous, _older;
+
+    public GazeSmoother(EyeSettings s)
+    {
+        _median = s.GazeMedianFilter;
+        _x = new OneEuro(s.GazeMinCutoff, s.GazeBeta, s.GazeDCutoff);
+        _y = new OneEuro(s.GazeMinCutoff, s.GazeBeta, s.GazeDCutoff);
+    }
+
+    // On a blink or a change of contributing eye, forget the old median window while keeping
+    // the filtered output continuous. A clock reset/reconnect also resets the adaptive filters.
+    public void ClearHistory() => _haveHistory = false;
+
+    public void Reset()
+    {
+        ClearHistory();
+        _x.Reset();
+        _y.Reset();
+    }
+
+    public (float X, float Y) Filter(float x, float y, float dt)
+    {
+        var input = (X: x, Y: y);
+        if (_median && _haveHistory)
+        {
+            x = Median3(x, _previous.X, _older.X);
+            y = Median3(y, _previous.Y, _older.Y);
+        }
+        if (!_haveHistory) { _previous = input; }
+        _older = _previous;
+        _previous = input;
+        _haveHistory = true;
+        return (_x.Filter(x, dt), _y.Filter(y, dt));
+    }
+
+    private static float Median3(float a, float b, float c) =>
+        MathF.Max(MathF.Min(a, b), MathF.Min(MathF.Max(a, b), c));
 }
 
 /// <summary>A histogram that forgets old samples with a fixed half-life, for running percentiles.</summary>
@@ -377,6 +425,7 @@ public sealed class LidPipeline
     public void Reset()
     {
         _count = 0;
+        _holdUntil = double.NegativeInfinity;
         _filter.Reset();
     }
 
@@ -422,7 +471,8 @@ public sealed class LidPipeline
 public sealed class EyeProcessor
 {
     private readonly EyeSettings _s;
-    private readonly OneEuro _lx, _ly, _rx, _ry;
+    private readonly GazeSmoother _leftGaze, _rightGaze;
+    private int _gazeSource;
     private double _lastTime = double.NaN;
     private EyeOutput _out = new() { OpenL = 1f, OpenR = 1f };
     private float _pitchDeg;
@@ -449,10 +499,8 @@ public sealed class EyeProcessor
             s.Calibration == "auto" && LidCalibration.FromJson(saved?[eye]) is { } c ? c : new LidCalibration(closed, open);
         Left = new LidPipeline(s, Start("left", s.LeftClosed, s.LeftOpen));
         Right = new LidPipeline(s, Start("right", s.RightClosed, s.RightOpen));
-        _lx = new OneEuro(s.GazeMinCutoff, s.GazeBeta, s.GazeDCutoff);
-        _ly = new OneEuro(s.GazeMinCutoff, s.GazeBeta, s.GazeDCutoff);
-        _rx = new OneEuro(s.GazeMinCutoff, s.GazeBeta, s.GazeDCutoff);
-        _ry = new OneEuro(s.GazeMinCutoff, s.GazeBeta, s.GazeDCutoff);
+        _leftGaze = new GazeSmoother(s);
+        _rightGaze = new GazeSmoother(s);
     }
 
     public EyeOutput Output => _out;
@@ -479,7 +527,8 @@ public sealed class EyeProcessor
             // Headset clock reset or a gap (standby, reconnect): start the filters afresh.
             Left.Reset();
             Right.Reset();
-            _lx.Reset(); _ly.Reset(); _rx.Reset(); _ry.Reset();
+            _leftGaze.Reset(); _rightGaze.Reset();
+            _gazeSource = 0;
             dt = 1 / 90.0;
         }
         var fdt = (float)Math.Clamp(dt, 0.004, 0.05);
@@ -543,6 +592,13 @@ public sealed class EyeProcessor
             useL = useL && Left.Normalized >= _s.GazeSingleEyeAbove;
             useR = useR && Right.Normalized >= _s.GazeSingleEyeAbove;
         }
+        var source = (useL ? 1 : 0) | (useR ? 2 : 0);
+        if (source != _gazeSource)
+        {
+            _leftGaze.ClearHistory();
+            _rightGaze.ClearHistory();
+            _gazeSource = source;
+        }
         if (!useL && !useR)
         {
             GazeHeldSamples++;
@@ -573,16 +629,14 @@ public sealed class EyeProcessor
         lx += ox; rx += ox; ly += oy; ry += oy;
         if (_s.Smoothing)
         {
-            lx = _lx.Filter(lx, fdt);
-            ly = _ly.Filter(ly, fdt);
+            (lx, ly) = _leftGaze.Filter(lx, ly, fdt);
             if (_s.CombinedGaze)
             {
                 (rx, ry) = (lx, ly);
             }
             else
             {
-                rx = _rx.Filter(rx, fdt);
-                ry = _ry.Filter(ry, fdt);
+                (rx, ry) = _rightGaze.Filter(rx, ry, fdt);
             }
         }
         _out.LeftX = lx * _s.GazeScale;

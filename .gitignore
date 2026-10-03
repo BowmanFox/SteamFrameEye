@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 headset/frameeye.conf.json
 headset/frameeye.vrmanifest
+.vs/

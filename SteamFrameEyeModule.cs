@@ -88,6 +88,11 @@ public class SteamFrameEyeModule : ExtTrackingModule
             "Gaze {Gaze}, smoothing {Smoothing}, calibration {Calibration} ({Lids})",
             _settings.Port, _settings.CombinedGaze ? "combined" : "per eye", _settings.Smoothing ? "on" : "off",
             _settings.Calibration, DescribeLids(_processor));
+        if (_settings.Smoothing)
+        {
+            Logger.LogInformation("SteamFrameEye: gaze smoothing median {Median}, minimum cutoff {Cutoff:F2} Hz, beta {Beta:F2}",
+                _settings.GazeMedianFilter ? "on" : "off", _settings.GazeMinCutoff, _settings.GazeBeta);
+        }
         return (true, false);
     }
 

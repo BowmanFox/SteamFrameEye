@@ -22,6 +22,30 @@ Tested on a Steam Frame with SteamVR 2.17.10 and the stock Python 3. The eye-ser
 
 ## Install
 
+### From Windows
+
+Run the PowerShell installer from the PC, using the headset's address and this PC's LAN address:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\headset\install-overlay.ps1 `
+    -HeadsetHost 192.168.1.50 -PcAddress 192.168.1.10
+```
+
+Requires Windows OpenSSH Client and SSH enabled on the Steam Frame. Normal SSH authentication and host-key prompts apply. The default remote user is `steamos`; use `-User`, `-SshPort` and `-IdentityFile` for another SSH configuration. `-PcAddress` accepts `host` or `host:port` (default 9021). `-NoLaunch` registers without starting immediately; `-WhatIf` previews the operation without connecting. Hostnames and IPv4 addresses are supported, matching the sender's IPv4 UDP transport.
+
+If you downloaded the headset release archive instead of cloning the repository, extract it on Windows and run its installer directly:
+
+```powershell
+New-Item -ItemType Directory -Force .\FrameEye-Bridge | Out-Null
+tar -xzf .\FrameEye-Bridge-0.5.2.tar.gz -C .\FrameEye-Bridge
+powershell -NoProfile -ExecutionPolicy Bypass -File .\FrameEye-Bridge\install-overlay.ps1 `
+    -HeadsetHost 192.168.1.50 -PcAddress 192.168.1.10
+```
+
+This uploads only release files, normalizes shell-script line endings and runs the Linux installer **on the headset**. Windows needs no Bash or WSL. The dashboard and eye-data reader still run on the headset, where the eye server's shared memory exists. Existing headset settings are retained except for the PC address passed to the installer.
+
+### From a Linux shell
+
 Copy this repository to the headset and run the installer with the PC's address. From the folder that contains the clone:
 
 ```
@@ -47,10 +71,11 @@ The settings card is used with the laser pointer. A click anywhere in a row acts
 - **Sending to PC** pauses or resumes the UDP output. The panel keeps showing the eye state while paused, so tracking itself can still be checked.
 - **PC address** is a text field. A click opens the SteamVR keyboard, pre-filled with the current value. Enter `host` or `host:port`; the port defaults to 9021. The field mirrors the typing and takes the value on *Done*. An unusable entry is ignored and logged.
 - **VRChat direct OSC (PC)** additionally sends the eye values as VRCFaceTracking "v2" avatar parameters straight to VRChat's OSC input on the PC, at port 9000 of the PC address. This is a way to run without VRCFaceTracking. It is not a standalone-headset mode, because VRChat does not run on the headset itself. It carries only the parameters listed below, so avatars that need VRCFaceTracking's derived or binary-encoded parameters still need VRCFaceTracking. With VRCFaceTracking running, leave it off, or both will write the same parameters.
+- **Direct OSC smoothing** defaults to on. It removes single-sample gaze and eyelid spikes, smooths small gaze movements and follows larger movements faster. During blinks or poor tracking, gaze holds; the open eye steers during a wink. The eye preview shows the smoothed values when direct OSC is active. Turning this off restores the original raw direct OSC values. This switch does not affect the raw feed to VRCFaceTracking.
 
 Direct OSC sends `/avatar/parameters/FT/EyeTrackingActive` (true) and, under `/avatar/parameters/FT/v2/`, `EyeLeftX`, `EyeLeftY`, `EyeRightX`, `EyeRightY`, `EyeX`, `EyeY`, `EyeLidLeft` and `EyeLidRight`. Gaze values are atan2(x, -z) · 4/π clamped to ±1, so ±45° maps to ±1. The prefix `/FT` can be changed with `--prefix`.
 
-Direct OSC sends the eye server's values as they are: per-eye gaze on that ±45° scale, uncalibrated eyelids, no smoothing. The smoothing, the per-eye eyelid calibration and the Quest Pro scale are done by the VRCFaceTracking module, so use it where possible.
+Direct OSC smooths per-eye gaze and the fixation-derived combined gaze in radians before mapping to the ±45° scale. A three-sample median followed by an adaptive One Euro filter reduces jitter; sustained movements gain one sample of median delay (about 11 ms at 90 Hz). A faster eyelid filter preserves short blinks and winks. Filters reset after a gap or a headset clock reset, when sending resumes, and when the smoothing switch or OSC target changes. Eyelid levels remain uncalibrated; the VRCFaceTracking module adds learned per-eye calibration and its own gaze mapping.
 
 All settings are written to `~/frameeye/frameeye.conf.json` immediately and survive restarts. They take precedence over the manifest arguments. A later `--install --raw <pc>:<port>` overwrites the address in that file.
 
@@ -59,11 +84,12 @@ All settings are written to `~/frameeye/frameeye.conf.json` immediately and surv
   "raw": ["192.0.2.10:9021"],
   "target": null,
   "enabled": true,
+  "osc_smoothing": true,
   "mouse_origin_bottom": true
 }
 ```
 
-`raw` lists the PCs that get `SFEY` packets, `target` is the VRChat OSC address or `null`, and `enabled` is the sending switch. The app writes these three. `mouse_origin_bottom` is optional and defaults to `true`, because OpenVR reports laser-pointer coordinates with the origin at the bottom left. Add it with `false` if hovering highlights the wrong row, then restart the app.
+`raw` lists the PCs that get `SFEY` packets, `target` is the VRChat OSC address or `null`, `enabled` is the sending switch, and `osc_smoothing` is the direct OSC filter switch (defaults to `true` for older configurations). `mouse_origin_bottom` is optional and defaults to `true`, because OpenVR reports laser-pointer coordinates with the origin at the bottom left. Add it with `false` if hovering highlights the wrong row, then restart the app.
 
 ## Command line
 
@@ -75,7 +101,7 @@ frameeye_overlay.py --uninstall                 remove the registration and stop
 frameeye_overlay.py --status                    show config, registration and the running instance
 ```
 
-Sender options: `--raw HOST:PORT` (repeatable), `--target HOST:PORT` for direct VRChat OSC, `--prefix`, `--poll-ms`, `--mmap`, `--verbose`. Overlay options: `--openvr-lib` (path to `libopenvr_api.so`, found automatically), `--log-file`, `--no-gl`.
+Sender options: `--raw HOST:PORT` (repeatable), `--target HOST:PORT` for direct VRChat OSC, `--no-osc-smoothing` to opt out of the default filter, `--prefix`, `--poll-ms`, `--mmap`, `--verbose`. The overlay's saved `osc_smoothing` setting takes precedence over the command-line default. Overlay options: `--openvr-lib` (path to `libopenvr_api.so`, found automatically), `--log-file`, `--no-gl`.
 
 ### Without SteamVR integration
 

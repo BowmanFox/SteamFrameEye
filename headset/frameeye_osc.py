@@ -30,6 +30,8 @@ import sys
 import threading
 import time
 
+from eye_smoothing import DirectOscSmoother
+
 MMAP_PATH = "/dev/shm/eye-server.mmap"
 SEQ_OFF = 0x38                # u32 sequence counter, bumped by the producer per sample
 EYE_DATA_OFF = 0x152          # start of the EyeDataMmap record (packed)
@@ -87,7 +89,7 @@ def parse_record(mm):
 
 
 def record_valid(r):
-    if r["producer_state"] != 1:
+    if r["producer_state"] != 1 or not math.isfinite(r["sample_time"]):
         return False
     vals = list(r["gaze"][0]) + list(r["gaze"][1]) + list(r["fixation"]) + list(r["openness"])
     return all(math.isfinite(v) for v in vals)
@@ -101,8 +103,8 @@ def derived_values(r):
     return (lx, ly, rx, ry, cx, cy, clamp(r["openness"][0], 0.0, 1.0), clamp(r["openness"][1], 0.0, 1.0))
 
 
-def build_osc(r, prefix):
-    lx, ly, rx, ry, cx, cy, lid_l, lid_r = vals = derived_values(r)
+def build_osc(r, prefix, values=None):
+    lx, ly, rx, ry, cx, cy, lid_l, lid_r = vals = derived_values(r) if values is None else values
     base = "/avatar/parameters" + prefix
     msgs = [osc_true(base + "/EyeTrackingActive")]
     for suffix, val in (("EyeLeftX", lx), ("EyeLeftY", ly), ("EyeRightX", rx), ("EyeRightY", ry),
@@ -191,6 +193,8 @@ def build_parser():
     ap.add_argument("--target", default=None, metavar="HOST:PORT",
                     help="direct VRChat OSC v2 parameters (when no VRCFT is used)")
     ap.add_argument("--prefix", default="/FT", help="avatar parameter prefix for --target, must start with '/'")
+    ap.add_argument("--no-osc-smoothing", dest="osc_smoothing", action="store_false",
+                    help="disable gaze/eyelid smoothing for direct OSC (raw SFEY is always unfiltered)")
     ap.add_argument("--poll-ms", type=float, default=DEFAULT_POLL_MS, help="poll interval for the sequence counter")
     ap.add_argument("--mmap", default=MMAP_PATH, help="eye server shared memory object")
     ap.add_argument("--once", action="store_true", help="send the current record once and exit")
@@ -211,6 +215,8 @@ def runtime_args(args):
         out += ["--poll-ms", str(args.poll_ms)]
     if args.mmap != MMAP_PATH:
         out += ["--mmap", args.mmap]
+    if not args.osc_smoothing:
+        out += ["--no-osc-smoothing"]
     return out
 
 
@@ -223,6 +229,9 @@ class SenderRuntime:
         self.raw_targets = [parse_hostport(r) for r in args.raw if r and r != "none"]
         self.osc_target = parse_hostport(args.target) if args.target and args.target != "none" else None
         self.enabled = True           # False: keep tracking state for display, send nothing
+        self.osc_smoothing = args.osc_smoothing
+        self._osc_smoother = DirectOscSmoother()
+        self._osc_mode = None
         self.prefix = args.prefix
         self.poll_s = max(0.001, args.poll_ms / 1000.0)
         self.mmap_path = args.mmap
@@ -255,6 +264,7 @@ class SenderRuntime:
         s["raw_targets"] = ["%s:%d" % t for t in self.raw_targets]
         s["osc_target"] = "%s:%d" % self.osc_target if self.osc_target else None
         s["enabled"] = self.enabled
+        s["osc_smoothing"] = self.osc_smoothing
         return s
 
     def set_targets(self, raw=None, osc="keep"):
@@ -271,6 +281,12 @@ class SenderRuntime:
         r = parse_record(mm)
         valid = record_valid(r)
         errors = 0
+        # Reset on pause/resume, target changes, or toggling the filter. Only this sender thread
+        # touches filter history; the dashboard changes the simple configuration attributes.
+        mode = (self.enabled, self.osc_target, self.osc_smoothing)
+        if mode != self._osc_mode or not valid:
+            self._osc_smoother.reset()
+            self._osc_mode = mode
         if not self.enabled:
             return valid, (derived_values(r) if valid else None), 0
         for target in self.raw_targets:
@@ -280,7 +296,9 @@ class SenderRuntime:
                 errors += 1
         vals = derived_values(r) if valid else None
         if valid and self.osc_target is not None:
-            msgs, _ = build_osc(r, self.prefix)
+            if self.osc_smoothing:
+                vals = self._osc_smoother.process(r)
+            msgs, _ = build_osc(r, self.prefix, vals)
             for m in msgs:
                 try:
                     self.sock.sendto(m, self.osc_target)
