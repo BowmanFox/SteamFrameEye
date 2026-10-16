@@ -25,7 +25,9 @@ with open(out, "w") as fh:
         if seq != last:
             if last is not None:
                 v = struct.unpack_from(FMT, mm, layout.record_offset)
-                fh.write("%.4f,%d,%d,%d,%s\n" % (time.monotonic(), seq, v[0], v[1], ",".join("%.6g" % x for x in v[2:])))
+                # Full precision for the headset time: with %.6g it rounds to 0.1 s after a few hours of uptime.
+                fh.write("%.4f,%d,%d,%d,%.6f,%s\n" % (time.monotonic(), seq, v[0], v[1], v[2],
+                                                      ",".join("%.6g" % x for x in v[3:])))
                 n += 1
             last = seq
         else:

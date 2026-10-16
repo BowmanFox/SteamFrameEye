@@ -159,37 +159,33 @@ Check(perEyeSag.OpenR == 0f && linkedSag.OpenL == 1f && linkedSag.OpenR == 1f &&
     "linked/left eyelids keep an eye open that the headset misreads as closed");
 Check(linkedBlink.OpenL == 0f && linkedBlink.OpenR == 0f, "linked eyelids still close both eyes in a blink");
 
-// Linked eyelids: a fast, held one-sided closure is a wink and passes through; a slow sag or a short dropout is not.
-(float minR, float minL, float endR) LinkedRight(Func<int, float> right, int samples)
+// Linked eyelids: a real wink hides that pupil (high covariance) and passes through even though the open eye narrows;
+// a one-sided lid misread keeps the pupil tracked and stays linked.
+(float minR, float minL, float endR, float endL) LinkedRight(Func<int, (float l, float r, float covR)> eyes, int samples)
 {
     var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
     for (var i = 0; i < 90; i++) p.Process(Sample(i / 90.0));
     float minR = 1, minL = 1;
     for (var i = 0; i < samples; i++)
     {
-        var o = p.Process(Sample(1 + i / 90.0, 0, 0, 1f, right(i)));
+        var (l, r, covR) = eyes(i);
+        var s = Sample(1 + i / 90.0, 0, 0, l, r);
+        s.CovR = covR;
+        var o = p.Process(s);
         minR = MathF.Min(minR, o.OpenR);
         minL = MathF.Min(minL, o.OpenL);
     }
-    return (minR, minL, p.Output.OpenR);
+    return (minR, minL, p.Output.OpenR, p.Output.OpenL);
 }
-var heldWink = LinkedRight(i => i < 2 ? 0.5f : 0.03f, 45);
-var sag = LinkedRight(i => MathF.Max(0.03f, 1f - i / 120f), 180);
-var dropout = LinkedRight(i => i is >= 10 and < 14 ? 0.03f : 1f, 45);
-Check(heldWink.endR == 0f && heldWink.minL == 1f, "linked eyelids pass a held wink through, other eye stays open");
-Check(sag.minR > 0.9f && dropout.minR > 0.9f,
-    $"linked eyelids ignore a slow one-sided sag ({sag.minR:F2}) and a 4-sample dropout ({dropout.minR:F2})");
-// The eye server's staggered blink: right at 0 while left reads 1.0 for 250 ms, then left closes too.
-var staggered = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
-var staggerSplit = false;
-for (var i = 0; i < 180; i++)
-{
-    var t = i / 90.0;
-    var (l, r) = i < 90 ? (1f, 1f) : i < 113 ? (1f, 0f) : i < 135 ? (0f, 0f) : (1f, 1f);
-    var o = staggered.Process(Sample(t, 0, 0, l, r));
-    staggerSplit |= MathF.Abs(o.OpenL - o.OpenR) > 0.3f;
-}
-Check(!staggerSplit, "linked eyelids keep a staggered blink (one eye first by 250 ms) together");
+var heldWink = LinkedRight(i => i < 2 ? (0.9f, 0.5f, 0.0004f) : (0.55f, 0.03f, i % 7 == 0 ? 0.008f : 0.05f), 90);
+var misread = LinkedRight(i => (1f, i < 30 ? 1f - i / 30f : 0.03f, 0.004f), 180);
+var bothLidsRead = LinkedRight(i => i < 2 ? (0.9f, 0.5f, 0.0004f) : (0f, 0.03f, 0.05f), 90);
+var staggered = LinkedRight(i => i < 23 ? (1f, 0f, 0.012f) : i < 45 ? (0f, 0f, 0.004f) : (1f, 1f, 0.0004f), 90);
+Check(heldWink.endR == 0f && heldWink.endL > 0.4f, $"linked eyelids pass a wink through while the open eye narrows (open eye {heldWink.endL:F2})");
+Check(bothLidsRead.endR == 0f && bothLidsRead.endL == 1f,
+    "linked eyelids show a wink when the open eye's lid also reads closed but its pupil is tracked");
+Check(misread.minR > 0.9f, $"linked eyelids keep an eye open whose lid is misread with its pupil tracked ({misread.minR:F2})");
+Check(MathF.Abs(staggered.minR - staggered.minL) < 0.01f, "linked eyelids keep a staggered blink (one eye first by 250 ms) together");
 
 var path = Path.Combine(Path.GetTempPath(), $"frameeye-settings-{Guid.NewGuid():N}.json");
 try
