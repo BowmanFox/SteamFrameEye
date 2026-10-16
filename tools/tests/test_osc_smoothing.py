@@ -23,13 +23,78 @@ def record(t, yaw=0, pitch=0, openness=(1, 1)):
                 fixation=direction, openness=openness)
 
 
-def memory(r):
-    buffer = bytearray(sender.EYE_DATA_OFF + sender.EYE_DATA_LEN)
-    struct.pack_into(sender.EYE_DATA_FMT, buffer, sender.EYE_DATA_OFF,
+V5 = sender.Layout(5, sender.EYE_SERVER_ABI[5][0], sender.EYE_SERVER_ABI[5][1], False)
+
+
+def memory(r, version=5, size=None, initialized=1):
+    """An eye server object as the given ABI version lays it out, holding record r."""
+    size = sender.EYE_SERVER_ABI[version][0] if size is None else size
+    buffer = bytearray(size)
+    struct.pack_into("<II", buffer, sender.VERSION_OFF, version, initialized)
+    struct.pack_into(sender.EYE_DATA_FMT, buffer, size - sender.RECORD_TAIL,
                      r["producer_state"], 1, r["sample_time"], *r["gaze"][0], *r["gaze"][1],
                      *r["cov"][0], *r["cov"][1], *r["fixation"],
                      *([0.0] * 12), *r["openness"], *([0.0] * 8))
     return buffer
+
+
+class EyeServerLayout(unittest.TestCase):
+    def test_known_versions(self):
+        for version, offset in ((4, 0x152), (5, 0x157)):
+            with self.subTest(version=version):
+                buffer = memory(record(1.5, 10), version)
+                layout = sender.detect_layout(buffer, len(buffer))
+                self.assertEqual((layout.version, layout.record_offset, layout.guessed), (version, offset, False))
+                r = sender.parse_record(buffer, layout.record_offset)
+                self.assertEqual(r["sample_time"], 1.5)
+                self.assertTrue(sender.record_valid(r, layout.guessed))
+
+    def test_reading_v5_with_the_v4_offset_is_rejected(self):
+        buffer = memory(record(1.5, 10), 5)
+        self.assertFalse(sender.record_valid(sender.parse_record(buffer, 0x152)))
+
+    def test_not_initialized_and_too_small(self):
+        buffer = memory(record(1), 5, initialized=0)
+        with self.assertRaises(sender.SourceNotReady) as ctx:
+            sender.detect_layout(buffer, len(buffer))
+        self.assertEqual(ctx.exception.state, "starting")
+        buffer = memory(record(1), 5)[:0x4F000]
+        with self.assertRaises(sender.SourceNotReady) as ctx:
+            sender.detect_layout(buffer, len(buffer))
+        self.assertEqual(ctx.exception.state, "unsupported")
+
+    def test_unknown_version_guesses_offset_and_needs_plausible_samples(self):
+        unit = math.sqrt(0.5)
+        r = record(2.0)
+        r["gaze"] = ((0, 0, -1), (unit, 0, -unit))
+        size = sender.EYE_SERVER_ABI[5][0] + 3
+        buffer = memory(r, 5, size=size)
+        struct.pack_into("<I", buffer, sender.VERSION_OFF, 6)
+        layout = sender.detect_layout(buffer, len(buffer))
+        self.assertEqual((layout.version, layout.record_offset, layout.guessed), (6, 0x15A, True))
+        self.assertTrue(sender.record_valid(sender.parse_record(buffer, layout.record_offset), True))
+        r["gaze"] = ((0, 0, -40), r["gaze"][1])
+        buffer = memory(r, 5, size=size)
+        self.assertFalse(sender.record_valid(sender.parse_record(buffer, 0x15A), True))
+        tiny = bytearray(0x1000)
+        struct.pack_into("<II", tiny, 0, 6, 1)
+        with self.assertRaises(sender.SourceNotReady) as ctx:
+            sender.detect_layout(tiny, len(tiny))
+        self.assertEqual(ctx.exception.state, "unsupported")
+
+    def test_open_mmap_and_version_change(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = str(Path(temp) / "eye-server.mmap")
+            Path(path).write_bytes(memory(record(3.0), 4))
+            mm, layout, inode = sender.open_mmap(path)
+            try:
+                self.assertEqual((layout.version, layout.record_offset), (4, 0x152))
+                self.assertIn("version 4", sender.source_info(path))
+                self.assertFalse(sender.source_changed(path, mm, layout, inode))
+                self.assertTrue(sender.source_changed(path, mm, layout._replace(version=5), inode))
+            finally:
+                mm.close()
+            self.assertIn("not available", sender.source_info(str(Path(temp) / "missing")))
 
 
 class OscSmoothing(unittest.TestCase):
@@ -128,6 +193,7 @@ class OscSmoothing(unittest.TestCase):
                 "--raw", "127.0.0.1:%d" % raw.getsockname()[1],
                 "--target", "127.0.0.1:%d" % osc.getsockname()[1]])
             runtime = sender.SenderRuntime(args)
+            runtime.layout = V5
             self.addCleanup(runtime.sock.close)
 
             def send_and_receive(r, seq):

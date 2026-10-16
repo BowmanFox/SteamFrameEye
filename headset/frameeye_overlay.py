@@ -238,12 +238,20 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
     panel.text(32, 28, OVERLAY_NAME, ACCENT, scale=2)
     state = snapshot.get("state", "?")
     rate = snapshot.get("rate", 0.0)
-    if state == "streaming" and not settings.enabled:
+    abi = snapshot.get("abi")
+    if state == "streaming" and snapshot.get("abi_guessed") and not snapshot.get("valid") \
+            and snapshot.get("samples", 0) >= 90:
+        state_text, state_color = "eye server v%s: layout not recognised" % abi, BAD
+    elif state == "streaming" and not settings.enabled:
         state_text, state_color = "eye data %.0f Hz, sending paused" % rate, WARN
     elif state == "streaming":
         state_text, state_color = "eye data streaming, %.0f Hz" % rate, OK
     elif state == "idle":
         state_text, state_color = "eye server idle (headset off / standby)", WARN
+    elif state == "starting":
+        state_text, state_color = "eye tracking server starting", WARN
+    elif state == "unsupported":
+        state_text, state_color = "eye server version not supported", BAD
     else:
         state_text, state_color = "waiting for the eye tracking server", BAD
     panel.text(32, 90, state_text, state_color)
@@ -273,7 +281,9 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
     draw_eye(panel, 564, eye_y, eye_r, rx, ry, lid_r, active)
     panel.text(462 - eye_r - 20, eye_y - CELL_H // 2, "L", DIM)
     panel.text(564 + eye_r + 8, eye_y - CELL_H // 2, "R", DIM)
-    panel.text(32, STATUS_CARD[3] - 12 - CELL_H, "SteamVR %s  %s" % (vr_version or "?", texture_path), DIM)
+    eye_abi = "-" if abi is None else "%s%s" % (abi, "?" if snapshot.get("abi_guessed") else "")
+    panel.text(32, STATUS_CARD[3] - 12 - CELL_H, "SteamVR %s  eye v%s  %s" % (vr_version or "?", eye_abi, texture_path),
+               DIM)
 
     # -- settings card
     host = settings.pc_host()
@@ -907,7 +917,8 @@ def register_live(enable, launch, library, run_args):
 def status(library):
     cfg = config_dir()
     lines = ["manifest: %s" % MANIFEST, "config: %s -> %s" % (CONFIG, json.dumps(load_config())),
-             "config dir: %s" % cfg, "running instance (lock): pid %d" % running_pid()]
+             "config dir: %s" % cfg, "running instance (lock): pid %d" % running_pid(),
+             frameeye_osc.source_info()]
     try:
         with open(MANIFEST, encoding="utf-8") as fh:
             lines.append("manifest arguments: %s" % json.load(fh)["applications"][0].get("arguments", ""))

@@ -18,6 +18,7 @@ Copyright (c) 2026 konsti219): https://github.com/konsti219/frameeyeosc
 Dependency-free Python re-implementation so it runs on stock SteamOS.
 """
 import argparse
+import collections
 import ctypes
 import logging
 import math
@@ -33,8 +34,20 @@ import time
 from eye_smoothing import DirectOscSmoother
 
 MMAP_PATH = "/dev/shm/eye-server.mmap"
+VERSION_OFF = 0x00            # u32 ABI version of the shared-memory object
+INIT_OFF = 0x04               # u32, 1 once the producer has set the object up
 SEQ_OFF = 0x38                # u32 sequence counter, bumped by the producer per sample
-EYE_DATA_OFF = 0x152          # start of the EyeDataMmap record (packed)
+HEADER_LEN = 0x40
+# Known ABI versions -> (object size, offset of the EyeDataMmap record). The header up to the
+# sequence counter and the record itself are unchanged between them; version 5 grew the control
+# block in between by 5 bytes (frameeyeosc "add support for protocol 5").
+EYE_SERVER_ABI = {
+    4: (0x4F21A, 0x152),      # eye server build 20260921 (SteamOS 0.4 before the 0.4.3 beta)
+    5: (0x4F21F, 0x157),      # eye server build 20260930 (SteamOS 0.4.3 beta)
+}
+# Object size minus record offset, the same in versions 4 and 5. An unknown version gets its record
+# offset guessed from this, and only plausible samples are used then (see record_valid).
+RECORD_TAIL = 0x4F0C8
 # EyeDataMmap (packed):
 #   u32 producer_state; u8 sample_flag; f64 sample_time;
 #   f32 gaze_direction[2][3]; f32 gaze_covariance_diag[2][3]; f32 fixation_point[3];
@@ -80,19 +93,67 @@ def osc_true(address):
     return osc_pad(address.encode()) + osc_pad(b",T")
 
 
-def parse_record(mm):
-    f = struct.unpack(EYE_DATA_FMT, mm[EYE_DATA_OFF:EYE_DATA_OFF + EYE_DATA_LEN])
+Layout = collections.namedtuple("Layout", "version size record_offset guessed")
+
+
+class SourceNotReady(OSError):
+    """The eye server object exists but is not usable yet (not initialized, or an unknown layout)."""
+
+    def __init__(self, message, state):
+        OSError.__init__(self, message)
+        self.state = state
+
+
+def detect_layout(mm, size):
+    """Layout of the mapped eye server object from its version word. Raises SourceNotReady."""
+    if size < HEADER_LEN:
+        raise SourceNotReady("eye server object is only %d bytes" % size, "starting")
+    version, initialized = struct.unpack_from("<II", mm, VERSION_OFF)
+    if initialized != 1:
+        raise SourceNotReady("eye server object not initialized yet (version %d)" % version, "starting")
+    known = EYE_SERVER_ABI.get(version)
+    if known is not None:
+        need, offset = known
+        if size < need:
+            raise SourceNotReady("eye server version %d needs %d bytes, object has %d" % (version, need, size),
+                                 "unsupported")
+        return Layout(version, size, offset, False)
+    offset = size - RECORD_TAIL
+    if not HEADER_LEN <= offset <= 0x1000:
+        raise SourceNotReady("unsupported eye server version %d (%d bytes)" % (version, size), "unsupported")
+    return Layout(version, size, offset, True)
+
+
+def describe_layout(layout):
+    return "version %d%s, %d bytes, record at 0x%x" % (
+        layout.version, " (unknown, record offset guessed)" if layout.guessed else "", layout.size,
+        layout.record_offset)
+
+
+def parse_record(mm, offset):
+    f = struct.unpack_from(EYE_DATA_FMT, mm, offset)
     return dict(producer_state=f[0], sample_flag=f[1], sample_time=f[2],
                 gaze=(f[3:6], f[6:9]), cov=(f[9:12], f[12:15]), fixation=f[15:18],
                 pre=(f[18:21], f[21:24]), pre_cov=(f[24:27], f[27:30]),
                 openness=f[30:32], extra=f[32:40])
 
 
-def record_valid(r):
+def record_plausible(r):
+    """Unit-length gaze directions and openness near 0..1, which a misaligned read practically never
+    produces. Only applied to a guessed layout."""
+    for gaze in r["gaze"]:
+        if not 0.5 < math.sqrt(sum(v * v for v in gaze)) < 1.5:
+            return False
+    return all(-0.5 <= o <= 1.5 for o in r["openness"])
+
+
+def record_valid(r, guessed=False):
     if r["producer_state"] != 1 or not math.isfinite(r["sample_time"]):
         return False
     vals = list(r["gaze"][0]) + list(r["gaze"][1]) + list(r["fixation"]) + list(r["openness"])
-    return all(math.isfinite(v) for v in vals)
+    if not all(math.isfinite(v) for v in vals):
+        return False
+    return record_plausible(r) if guessed else True
 
 
 def derived_values(r):
@@ -127,16 +188,47 @@ def parse_hostport(s):
 
 
 def open_mmap(path, writable=False):
-    """Maps the eye server object. The futex wait needs the address of the sequence word, which
-    ctypes only hands out for a writable mapping; nothing is ever written to it."""
+    """Maps the eye server object and returns (mmap, Layout, inode). The futex wait needs the address
+    of the sequence word, which ctypes only hands out for a writable mapping; nothing is ever written
+    to it. Raises SourceNotReady while the object is not initialized or has an unknown layout."""
     fd = os.open(path, os.O_RDWR if writable else os.O_RDONLY)
     try:
-        size = os.fstat(fd).st_size
-        if size < EYE_DATA_OFF + EYE_DATA_LEN:
-            raise OSError("unexpected mmap size %d" % size)
-        return mmap.mmap(fd, size, access=mmap.ACCESS_WRITE if writable else mmap.ACCESS_READ)
+        st = os.fstat(fd)
+        if st.st_size < HEADER_LEN:
+            raise SourceNotReady("eye server object is only %d bytes" % st.st_size, "starting")
+        mm = mmap.mmap(fd, st.st_size, access=mmap.ACCESS_WRITE if writable else mmap.ACCESS_READ)
     finally:
         os.close(fd)
+    try:
+        layout = detect_layout(mm, st.st_size)
+        if layout.record_offset + EYE_DATA_LEN > st.st_size:
+            raise SourceNotReady("eye server object too small for its record", "unsupported")
+    except OSError:
+        mm.close()
+        raise
+    return mm, layout, st.st_ino
+
+
+def source_changed(path, mm, layout, inode):
+    """True when the eye server re-created its object or changed its version since it was mapped."""
+    try:
+        if os.stat(path).st_ino != inode:
+            return True
+        return struct.unpack_from("<I", mm, VERSION_OFF)[0] != layout.version
+    except (OSError, ValueError):
+        return True
+
+
+def source_info(path=MMAP_PATH):
+    """One line about the eye server object, for --status and --once."""
+    try:
+        mm, layout, _ = open_mmap(path)
+    except SourceNotReady as e:
+        return "eye server: %s" % e
+    except OSError as e:
+        return "eye server: %s not available (%s)" % (path, e.strerror or e)
+    mm.close()
+    return "eye server: %s" % describe_layout(layout)
 
 
 # --- futex wait on the producer's sequence word (what the eye server signals on every sample) -------
@@ -235,13 +327,15 @@ class SenderRuntime:
         self.prefix = args.prefix
         self.poll_s = max(0.001, args.poll_ms / 1000.0)
         self.mmap_path = args.mmap
+        self.layout = None            # Layout of the mapped eye server object
         self.verbose = args.verbose
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._stop = threading.Event()
         self._thread = None
         self._lock = threading.Lock()
         self._stats = dict(state="no-source", seq=None, samples=0, valid=0, rate=0.0, last_change=None,
-                           values=None, valid_last=False, opens=0, send_errors=0, wait="-", started=time.monotonic())
+                           values=None, valid_last=False, opens=0, send_errors=0, wait="-", abi=None,
+                           abi_guessed=False, source_error=None, started=time.monotonic())
 
     # -- lifecycle
 
@@ -278,8 +372,9 @@ class SenderRuntime:
     # -- one sample
 
     def send_record(self, mm, seq):
-        r = parse_record(mm)
-        valid = record_valid(r)
+        layout = self.layout
+        r = parse_record(mm, layout.record_offset)
+        valid = record_valid(r, layout.guessed)
         errors = 0
         # Reset on pause/resume, target changes, or toggling the filter. Only this sender thread
         # touches filter history; the dashboard changes the simple configuration attributes.
@@ -318,26 +413,37 @@ class SenderRuntime:
     def _run(self):
         mm = None
         waiter = None
+        inode = None
         last_seq = None
         rate = 0.0
         last_sample_t = None
+        next_source_check = 0.0
         while not self._stop.is_set():
             if mm is None:
                 try:
                     try:
-                        mm = open_mmap(self.mmap_path, writable=True)
+                        mm, layout, inode = open_mmap(self.mmap_path, writable=True)
+                    except SourceNotReady:
+                        raise
                     except OSError:
-                        mm = open_mmap(self.mmap_path)
+                        mm, layout, inode = open_mmap(self.mmap_path)
+                    self.layout = layout
                     waiter = SeqWaiter(mm, self.poll_s)
                     last_seq = None
-                    self._set(state="idle", opens=self._stats["opens"] + 1, wait="futex" if waiter.usable else "poll")
-                    log.info("opened %s (%s wait) -> raw %s osc %s", self.mmap_path,
+                    self._set(state="idle", opens=self._stats["opens"] + 1, wait="futex" if waiter.usable else "poll",
+                              abi=layout.version, abi_guessed=layout.guessed, source_error=None)
+                    log.info("opened %s, %s (%s wait) -> raw %s osc %s", self.mmap_path, describe_layout(layout),
                              "futex" if waiter.usable else "polling",
                              ["%s:%d" % t for t in self.raw_targets], self.osc_target)
+                    if layout.guessed:
+                        log.warning("eye server version %d is not known to this FrameEye Bridge; trying the record "
+                                    "offset 0x%x derived from the object size and sending only plausible samples",
+                                    layout.version, layout.record_offset)
                 except OSError as e:
-                    if self._stats["state"] != "no-source":
-                        log.info("eye server not available (%s); retrying", e)
-                    self._set(state="no-source")
+                    state = getattr(e, "state", "no-source")
+                    if self._stats["state"] != state or self._stats["source_error"] != str(e):
+                        log.info("eye server not usable (%s); retrying", e)
+                    self._set(state=state, source_error=str(e))
                     self._stop.wait(REOPEN_SECONDS)
                     continue
             try:
@@ -372,6 +478,14 @@ class SenderRuntime:
             elif self._stats["state"] == "streaming" and last_sample_t is not None and now - last_sample_t > STALE_SECONDS:
                 self._set(state="idle", rate=0.0)
                 log.info("eye data idle (headset not worn or SteamVR in standby)")
+            elif self._stats["state"] != "streaming" and now >= next_source_check:
+                # An eye server restart (for example after an update) re-creates the object, possibly
+                # with another version; the old mapping would then never change again.
+                next_source_check = now + REOPEN_SECONDS
+                if source_changed(self.mmap_path, mm, self.layout, inode):
+                    log.info("eye server object changed; reopening")
+                    mm = waiter = None
+                    continue
             if seq == last_seq:
                 waiter.wait(seq)
         try:
@@ -392,9 +506,10 @@ def main(argv=None):
         sys.exit(str(e))
     if args.once:
         try:
-            mm = open_mmap(args.mmap)
+            mm, runtime.layout, _ = open_mmap(args.mmap)
         except OSError as e:
             sys.exit("cannot open %s: %s" % (args.mmap, e))
+        log.info("%s: %s", args.mmap, describe_layout(runtime.layout))
         runtime.verbose = True
         seq = struct.unpack_from("<I", mm, SEQ_OFF)[0]
         runtime.send_record(mm, seq)

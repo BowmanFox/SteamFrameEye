@@ -17,13 +17,13 @@ Steam Frame (headset)                                        PC
 (eye-tracking service)       (headset/, SteamVR app)         UnifiedTracking.Data.Eye.{Left,Right}.{Gaze,Openness}
 ```
 
-- The headset's eye-tracking service publishes every sample (90 Hz) in the shared-memory object `/dev/shm/eye-server.mmap`. FrameEye Bridge waits on its sequence counter and sends one 96-byte `SFEY` packet per sample. It runs as the `steamos` user from the home directory, needs no root and leaves the read-only system untouched. The memory layout follows [konsti219/frameeyeosc](https://github.com/konsti219/frameeyeosc) (MIT).
+- The headset's eye-tracking service publishes every sample (90 Hz) in the shared-memory object `/dev/shm/eye-server.mmap`. FrameEye Bridge waits on its sequence counter and sends one 96-byte `SFEY` packet per sample. It runs as the `steamos` user from the home directory, needs no root and leaves the read-only system untouched. The memory layout follows [konsti219/frameeyeosc](https://github.com/konsti219/frameeyeosc) (MIT). Since v0.5.3 the app reads the object's ABI version and supports versions 4 and 5; version 5 arrived with the SteamOS 0.4.3 beta (see [headset/README.md](headset/README.md)). The SFEY packet and the PC module are unchanged.
 - The module listens on UDP 9021, validates each packet, runs it through the processing described below and writes gaze and openness into VRCFaceTracking. Pupil diameter is pinned to 5 mm because the headset does not provide it.
 - Data only flows while the headset is worn and SteamVR is out of standby. The module holds the last values and logs when packets stop and resume.
 
 ## Quick start
 
-1. **Windows PC:** run `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`, then install `dist\SteamFrameEyeModule-0.5.2.zip` with VRCFaceTracking's "install local module". Allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
+1. **Windows PC:** run `powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1`, then install `dist\SteamFrameEyeModule-0.5.3.zip` with VRCFaceTracking's "install local module". Allow inbound UDP 9021 for VRCFaceTracking's module process in Windows Firewall.
 2. **Headset:** install FrameEye Bridge with the PC's address, as described in [headset/README.md](headset/README.md).
 3. Start VRCFaceTracking and put the headset on. The eyelid calibration learns within about a minute of normal blinking and is kept for the next session.
 
@@ -50,7 +50,7 @@ To package an already built DLL:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\packaging\package.ps1 `
-    -Version 0.5.2 -DownloadUrlBase 'https://example.com/releases/download/v0.5.2' `
+    -Version 0.5.3 -DownloadUrlBase 'https://example.com/releases/download/v0.5.3' `
     -PageUrl 'https://example.com/project'
 ```
 

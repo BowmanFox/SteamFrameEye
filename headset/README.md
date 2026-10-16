@@ -20,6 +20,8 @@ Steam Frame (headset)                                        PC
 
 Tested on a Steam Frame with SteamVR 2.17.10 and the stock Python 3. The eye-server object is an undocumented interface and may change with SteamOS updates.
 
+The app reads the object's version word and supports eye-server ABI versions 4 (build 20260921) and 5 (build 20260930, shipped with the SteamOS 0.4.3 beta, which moved the eye record from offset 0x152 to 0x157). For an unknown newer version it derives the record offset from the object size, which held across the 4 to 5 change, and sends only samples with unit-length gaze vectors and plausible openness. The dashboard footer shows the version in use (`eye v5`, or `eye v6?` when guessed), and `--status` prints it.
+
 ## Install
 
 ### From Windows
@@ -37,7 +39,7 @@ If you downloaded the headset release archive instead of cloning the repository,
 
 ```powershell
 New-Item -ItemType Directory -Force .\FrameEye-Bridge | Out-Null
-tar -xzf .\FrameEye-Bridge-0.5.2.tar.gz -C .\FrameEye-Bridge
+tar -xzf .\FrameEye-Bridge-0.5.3.tar.gz -C .\FrameEye-Bridge
 powershell -NoProfile -ExecutionPolicy Bypass -File .\FrameEye-Bridge\install-overlay.ps1 `
     -HeadsetHost 192.168.1.50 -PcAddress 192.168.1.10
 ```
@@ -135,7 +137,8 @@ python3 frameeye_osc.py --raw <pc-ip>:9021 [--target <pc-ip>:9000] [--verbose]
 
 - **Do not use `--no-gl`.** The panel is normally streamed into one persistent OpenGL ES texture (`gl_texture.py`, EGL surfaceless on Mesa zink) and handed to SteamVR with `SetOverlayTexture`. With `--no-gl`, or if the GL setup fails, the app falls back to `SetOverlayRaw`. On the Steam Frame with SteamVR 2.17.10, vrcompositor has been observed to crash with SIGBUS shortly after a client that used `SetOverlayRaw` exits, and gamescope can then restart in a loop. If the footer shows `raw` instead of `GL`, check the log for `GL texture path unavailable`.
 - **Empty dashboard tab, log says `SteamVR could not share the panel texture`.** SteamVR could not create the image the panel is shown with. On the Steam Frame this happened once the compositor had run out of shared-resource slots (`Ran out of IPC SharedObjectManager entries` in the system journal), used up by another overlay that reloads its image from a file. SteamVR's client library crashes on its next call after that error, so the app stops talking to SteamVR: eye data keeps flowing, the tab stays empty, and the app reconnects by itself after SteamVR has been restarted.
-- The eye-server layout is not a public interface. If a SteamOS update changes it, the tab stays on "waiting for the eye tracking server" or shows implausible values.
+- The eye-server layout is not a public interface. If a SteamOS update changes it in a way the size-based guess does not cover, the tab shows "eye server version not supported" or "layout not recognised" and nothing is sent. The app reopens the object by itself when the eye server re-creates it, for example after an update.
+- SteamOS 0.4.3 added *Track Dominant Eye Only* (VR Settings > General, advanced settings). What the eye server reports for the untracked eye in that mode has not been checked yet; if eye data stops while it is on, turn it off and record a sample with `tools/record_eyes.py`.
 
 ## Files
 
