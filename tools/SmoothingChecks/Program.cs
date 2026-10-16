@@ -120,6 +120,30 @@ Check(reset.OpenL == 1 && reset.OpenR == 1 && Math.Abs(Deg(reset.LeftX) + 12) < 
 var reconnect = clock.Process(Sample(5, 8, -3));
 Check(Math.Abs(Deg(reconnect.LeftX) - 8) < 0.001, "reconnect starts at the current gaze");
 
+// Many shallow dips (looking down, a sagging lid) around a few real blinks must not lift the closed level.
+var lidSettings = new EyeSettings { BlinkHoldMs = 0 };
+var lids = new EyeProcessor(lidSettings);
+var lidTime = 0.0;
+void Lid(float value, int samples)
+{
+    for (var i = 0; i < samples; i++, lidTime += 1 / 90.0)
+    {
+        lids.Process(Sample(lidTime, 0, 0, value, value));
+    }
+}
+Lid(1f, 1000);
+for (var round = 0; round < 10; round++)
+{
+    Lid(1f, 120); Lid(0.5f, 20);    // shallow dip to 0.5
+    Lid(1f, 120); Lid(0.55f, 8);
+    Lid(1f, 120); Lid(0.05f, 12);   // real blink
+}
+Lid(1f, 90);
+Check(lids.Left.Calibration.Closed < 0.15f && lids.Left.Calibration.BlinksSeen == 10,
+    $"shallow dips do not lift the closed level (learned {lids.Left.Calibration.Closed:F2}, {lids.Left.Calibration.BlinksSeen} blinks)");
+Lid(0.8f, 30);
+Check(lids.Output.OpenL > 0.75f, $"a raw 0.8 lid shows mostly open ({lids.Output.OpenL:F2})");
+
 var path = Path.Combine(Path.GetTempPath(), $"frameeye-settings-{Guid.NewGuid():N}.json");
 try
 {

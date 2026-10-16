@@ -239,6 +239,10 @@ public sealed class LidCalibration
     // A blink must take the lid at least 40 % below the open level. Deriving this from the learned closed
     // level instead feeds back on itself (shallower dips count, the closed level rises, and so on).
     private const float DipBelowFractionOfOpen = 0.6f;
+    // Only a dip whose bottom reaches 65 % below the open level teaches the closed level. Shallower dips are
+    // lids hovering around the threshold: looking down, squints, and one eye sagging to ~0.5 with the
+    // SteamOS 0.4.3 eye server. Counted, they lifted the closed level to ~0.5 and relaxed eyes showed half shut.
+    private const float BlinkBottomFractionOfOpen = 0.35f;
 
     private readonly DecayingHistogram _all = new(180);
     private readonly DecayingHistogram[] _bands = Enumerable.Range(0, 7).Select(_ => new DecayingHistogram(300)).ToArray();
@@ -297,7 +301,7 @@ public sealed class LidCalibration
         else if (_inDip && value >= dipBelow)
         {
             _inDip = false;
-            if (_dipSamples >= 3)
+            if (_dipSamples >= 3 && _dipMin <= BlinkBottomFractionOfOpen * Open)
             {
                 _minima.Enqueue(_dipMin);
                 while (_minima.Count > MinimaKept)
