@@ -85,9 +85,10 @@ public class SteamFrameEyeModule : ExtTrackingModule
         _rxThread.Start();
         Logger.LogInformation(
             "SteamFrameEye: listening on UDP {Port}; on the headset, enter this PC's address in FrameEye Bridge. " +
-            "Gaze {Gaze}, smoothing {Smoothing}, calibration {Calibration} ({Lids})",
-            _settings.Port, _settings.CombinedGaze ? "combined" : "per eye", _settings.Smoothing ? "on" : "off",
-            _settings.Calibration, DescribeLids(_processor));
+            "Gaze {Gaze}, eyelids {Eyelids}, smoothing {Smoothing}, calibration {Calibration} ({Lids})",
+            _settings.Port, _settings.CombinedGaze ? "combined" : "per eye",
+            _settings.Eyelids == "linked" ? "linked (winks pass)" : _settings.Eyelids.Replace('_', ' '),
+            _settings.Smoothing ? "on" : "off", _settings.Calibration, DescribeLids(_processor));
         if (_settings.Smoothing)
         {
             Logger.LogInformation("SteamFrameEye: gaze smoothing median {Median}, minimum cutoff {Cutoff:F2} Hz, beta {Beta:F2}",

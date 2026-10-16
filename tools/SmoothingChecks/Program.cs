@@ -144,13 +144,61 @@ Check(lids.Left.Calibration.Closed < 0.15f && lids.Left.Calibration.BlinksSeen =
 Lid(0.8f, 30);
 Check(lids.Output.OpenL > 0.75f, $"a raw 0.8 lid shows mostly open ({lids.Output.OpenL:F2})");
 
+// One lid misread as closed for seconds: linked eyelids keep both open, a real blink still closes both.
+EyeOutput Lids(string mode, float openL, float openR)
+{
+    var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = mode });
+    for (var i = 0; i < 270; i++) p.Process(Sample(i / 90.0, 0, 0, openL, openR));
+    return p.Output;
+}
+var perEyeSag = Lids("per_eye", 1f, 0.1f);
+var linkedSag = Lids("linked", 1f, 0.1f);
+var linkedBlink = Lids("linked", 0.05f, 0.05f);
+var leftOnly = Lids("left", 1f, 0.1f);
+Check(perEyeSag.OpenR == 0f && linkedSag.OpenL == 1f && linkedSag.OpenR == 1f && leftOnly.OpenR == 1f,
+    "linked/left eyelids keep an eye open that the headset misreads as closed");
+Check(linkedBlink.OpenL == 0f && linkedBlink.OpenR == 0f, "linked eyelids still close both eyes in a blink");
+
+// Linked eyelids: a fast, held one-sided closure is a wink and passes through; a slow sag or a short dropout is not.
+(float minR, float minL, float endR) LinkedRight(Func<int, float> right, int samples)
+{
+    var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
+    for (var i = 0; i < 90; i++) p.Process(Sample(i / 90.0));
+    float minR = 1, minL = 1;
+    for (var i = 0; i < samples; i++)
+    {
+        var o = p.Process(Sample(1 + i / 90.0, 0, 0, 1f, right(i)));
+        minR = MathF.Min(minR, o.OpenR);
+        minL = MathF.Min(minL, o.OpenL);
+    }
+    return (minR, minL, p.Output.OpenR);
+}
+var heldWink = LinkedRight(i => i < 2 ? 0.5f : 0.03f, 45);
+var sag = LinkedRight(i => MathF.Max(0.03f, 1f - i / 120f), 180);
+var dropout = LinkedRight(i => i is >= 10 and < 14 ? 0.03f : 1f, 45);
+Check(heldWink.endR == 0f && heldWink.minL == 1f, "linked eyelids pass a held wink through, other eye stays open");
+Check(sag.minR > 0.9f && dropout.minR > 0.9f,
+    $"linked eyelids ignore a slow one-sided sag ({sag.minR:F2}) and a 4-sample dropout ({dropout.minR:F2})");
+// The eye server's staggered blink: right at 0 while left reads 1.0 for 250 ms, then left closes too.
+var staggered = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
+var staggerSplit = false;
+for (var i = 0; i < 180; i++)
+{
+    var t = i / 90.0;
+    var (l, r) = i < 90 ? (1f, 1f) : i < 113 ? (1f, 0f) : i < 135 ? (0f, 0f) : (1f, 1f);
+    var o = staggered.Process(Sample(t, 0, 0, l, r));
+    staggerSplit |= MathF.Abs(o.OpenL - o.OpenR) > 0.3f;
+}
+Check(!staggerSplit, "linked eyelids keep a staggered blink (one eye first by 250 ms) together");
+
 var path = Path.Combine(Path.GetTempPath(), $"frameeye-settings-{Guid.NewGuid():N}.json");
 try
 {
-    File.WriteAllText(path, """{"smoothing":true,"gaze_median_filter":false,"gaze_min_cutoff":0.6,"gaze_beta":4}""");
+    File.WriteAllText(path, """{"smoothing":true,"gaze_median_filter":false,"gaze_min_cutoff":0.6,"gaze_beta":4,"eyelids":"Linked"}""");
     var loaded = EyeSettings.Load(path, Console.WriteLine);
     Check(loaded.Smoothing && !loaded.GazeMedianFilter && loaded.GazeMinCutoff == 0.6f && loaded.GazeBeta == 4,
         "JSON settings control gaze smoothing");
+    Check(loaded.Eyelids == "linked", "JSON settings select linked eyelids");
 }
 finally { File.Delete(path); }
 

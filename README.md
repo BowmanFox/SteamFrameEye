@@ -96,6 +96,7 @@ What the module does with every sample:
   - A One Euro filter smooths without delaying blinks, then snap zones map the bottom 15 % to fully closed and the top 10 % to fully open.
   - Blink sync closes the second eye when one eye is fully closed and the other is mostly closed. Real winks, where the other eye stays open, are left alone.
   - A closed eye is held closed for 80 ms so short blinks survive VRChat's slower network sync for other players.
+  - **Linked eyelids** (`"eyelids": "linked"`): with the SteamOS 0.4.3 eye server, one eye's lid can read 0.15 to 0.5, or 0, for seconds while that eye is open and its pupil is still tracked, so its gaze confidence cannot tell this from a wink. Linked mode shows both eyes at the more open eye's value, so blinks still close both eyes. A wink still passes through when one lid falls from open to closed within 200 ms and stays closed for 300 ms while the other eye stays clearly open. The misreads drift down slowly, hover, last a few samples, or start a staggered blink in which the eye server closes the second eye up to about 250 ms after the first. A wink therefore appears about 0.3 s after it starts, and winks shorter than that are not shown.
 - **Gaze:** both eyes are averaged into one gaze (like a Quest Pro via Steam Link). Since v0.5.2, a three-sample median rejects isolated spikes before a One Euro filter (minimum cutoff 0.8 Hz, beta 5). The median delays a sustained movement by one sample, about 11 ms at 90 Hz. Only eyes that are clearly open and tracked steer: during a wink the open eye steers both, during blinks and with both eyes closed the gaze holds. Median history clears when the contributing eyes change, and all filters reset after a clock reset or reconnect.
 - **Persistence:** the learned levels are saved to `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.calibration.json` every minute and when VRCFaceTracking closes, but only after about 30 s of reliable data and a few blinks per eye. A saved file with implausible values is ignored.
 
@@ -148,6 +149,7 @@ All settings are optional, in `%APPDATA%\VRCFaceTracking\SteamFrameEyeModule.jso
 | `lid_gaze_compensation` | true | learn the open level per vertical gaze band |
 | `closed_snap`, `open_snap` | 0.15, 0.9 | calibrated openness below / above these shows fully closed / open |
 | `blink_sync`, `blink_sync_below` | true, 0.35 | close the second eye with the first when it is below this |
+| `eyelids` | `per_eye` | `per_eye`: each eye its own openness; `linked`: both eyes show the more open eye, except during a recognised wink; `left` / `right`: both eyes follow that eye |
 | `blink_hold_ms` | 80 | keep a closed eye closed this long (0 disables) |
 | `gaze_hold_below` | 0.6 | an eye's gaze is only used while its calibrated openness is at least this |
 | `gaze_single_eye_above` | 0.8 | ...and at least this when it is the only eye steering (a wink) |

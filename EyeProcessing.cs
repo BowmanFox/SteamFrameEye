@@ -39,6 +39,9 @@ public sealed class EyeSettings
     public float ClosedSnap = 0.15f, OpenSnap = 0.9f;
     public bool BlinkSync = true;          // one eye fully closed and the other mostly closed: close both
     public float BlinkSyncBelow = 0.35f;
+    // "per_eye" (winks), "linked" (both eyes show the more open one: a lid the eye server misreads as closed on
+    // one side no longer shuts that eye, blinks still close both, winks are lost), "left"/"right" (both follow one eye).
+    public string Eyelids = "per_eye";
     public int BlinkHoldMs = 80;
     public float GazeHoldBelow = 0.6f;     // an eye's gaze is only used while its openness is at least this
     public float GazeSingleEyeAbove = 0.8f; // ...and at least this when it is the only eye steering (a wink)
@@ -90,6 +93,8 @@ public sealed class EyeSettings
             s.OpenSnap = Math.Clamp(Float("open_snap", s.OpenSnap), 0.55f, 1f);
             s.BlinkSync = Bool("blink_sync", s.BlinkSync);
             s.BlinkSyncBelow = Math.Clamp(Float("blink_sync_below", s.BlinkSyncBelow), 0f, 0.9f);
+            var lids = Str("eyelids", s.Eyelids).ToLowerInvariant();
+            s.Eyelids = lids is "per_eye" or "linked" or "left" or "right" ? lids : "per_eye";
             s.BlinkHoldMs = Math.Clamp(Int("blink_hold_ms", s.BlinkHoldMs), 0, 500);
             s.GazeHoldBelow = Math.Clamp(Float("gaze_hold_below", s.GazeHoldBelow), 0f, 1f);
             s.GazeSingleEyeAbove = Math.Clamp(Float("gaze_single_eye_above", s.GazeSingleEyeAbove), 0f, 1f);
@@ -471,11 +476,65 @@ public sealed class LidPipeline
         MathF.Max(MathF.Min(a, b), MathF.Min(MathF.Max(a, b), c));
 }
 
+/// <summary>Recognises a deliberate wink for linked eyelids: one lid falls from open to closed within 200 ms and
+/// stays closed for 300 ms while the other eye stays clearly open. The eye server's one-sided misreads either drift
+/// down over a second or more, hover around 0.15-0.5, last only a few samples, or come with a dip of the other eye.
+/// It also reports many blinks staggered: one eye at 0 while the other reads 1.0 for up to ~250 ms before it closes
+/// too, which the 300 ms confirmation leaves out.</summary>
+public sealed class WinkDetector
+{
+    private const float OpenAbove = 0.7f, ClosedBelow = 0.15f, StayClosedBelow = 0.3f, EndAbove = 0.5f;
+    private const float OtherOpenAbove = 0.8f, OtherKeepAbove = 0.6f;
+    private const double MaxFallSeconds = 0.2, ConfirmSeconds = 0.3;
+    private double _lastOpen = double.NegativeInfinity;
+    private double _candidateSince = double.NaN;
+
+    public bool Active { get; private set; }
+
+    public void Reset()
+    {
+        _lastOpen = double.NegativeInfinity;
+        _candidateSince = double.NaN;
+        Active = false;
+    }
+
+    /// <param name="self">this eye's calibrated openness (before smoothing), <paramref name="other"/> the other eye's</param>
+    public bool Update(double t, float self, float other)
+    {
+        if (Active)
+        {
+            Active = self < EndAbove && other >= OtherKeepAbove;
+        }
+        else if (!double.IsNaN(_candidateSince))
+        {
+            if (self > StayClosedBelow || other < OtherOpenAbove)
+            {
+                _candidateSince = double.NaN;
+            }
+            else if (t - _candidateSince >= ConfirmSeconds)
+            {
+                Active = true;
+                _candidateSince = double.NaN;
+            }
+        }
+        else if (self <= ClosedBelow && other >= OtherOpenAbove && t - _lastOpen <= MaxFallSeconds)
+        {
+            _candidateSince = t;
+        }
+        if (self >= OpenAbove)
+        {
+            _lastOpen = t;
+        }
+        return Active;
+    }
+}
+
 /// <summary>Turns SFEY samples into VRCFaceTracking eye values.</summary>
 public sealed class EyeProcessor
 {
     private readonly EyeSettings _s;
     private readonly GazeSmoother _leftGaze, _rightGaze;
+    private readonly WinkDetector _winkL = new(), _winkR = new();
     private int _gazeSource;
     private double _lastTime = double.NaN;
     private EyeOutput _out = new() { OpenL = 1f, OpenR = 1f };
@@ -531,6 +590,7 @@ public sealed class EyeProcessor
             // Headset clock reset or a gap (standby, reconnect): start the filters afresh.
             Left.Reset();
             Right.Reset();
+            _winkL.Reset(); _winkR.Reset();
             _leftGaze.Reset(); _rightGaze.Reset();
             _gazeSource = 0;
             dt = 1 / 90.0;
@@ -583,18 +643,43 @@ public sealed class EyeProcessor
                 _out.OpenL = 0f;
             }
         }
+        var normL = Left.Normalized;
+        var normR = Right.Normalized;
+        switch (_s.Eyelids)
+        {
+            case "linked":
+                // The Frame's eye server can read one lid as closed for seconds while that pupil is still tracked;
+                // real blinks close both lids, so the more open eye is the better estimate for both. A recognised
+                // wink keeps each eye on its own value.
+                var winkL = _winkL.Update(x.SampleTime, normL, normR);
+                var winkR = _winkR.Update(x.SampleTime, normR, normL);
+                if (!winkL && !winkR)
+                {
+                    _out.OpenL = _out.OpenR = MathF.Max(_out.OpenL, _out.OpenR);
+                    normL = normR = MathF.Max(normL, normR);
+                }
+                break;
+            case "left":
+                _out.OpenR = _out.OpenL;
+                normR = normL;
+                break;
+            case "right":
+                _out.OpenL = _out.OpenR;
+                normL = normR;
+                break;
+        }
 
         // Gaze only from eyes that are open and tracked: during a blink the eye server's estimate jumps by
         // several degrees per sample, and a closed eye's gaze is meaningless. One eye closed (a wink): the open
         // eye steers both. Both closed: hold.
-        var useL = trackedL && Left.Normalized >= _s.GazeHoldBelow;
-        var useR = trackedR && Right.Normalized >= _s.GazeHoldBelow;
+        var useL = trackedL && normL >= _s.GazeHoldBelow;
+        var useR = trackedR && normR >= _s.GazeHoldBelow;
         if (useL != useR)
         {
             // Only one eye qualifies: trust it only if clearly open (the open eye of a wink), not a lid that is
             // half-way through a blink while the other eye has already lost tracking.
-            useL = useL && Left.Normalized >= _s.GazeSingleEyeAbove;
-            useR = useR && Right.Normalized >= _s.GazeSingleEyeAbove;
+            useL = useL && normL >= _s.GazeSingleEyeAbove;
+            useR = useR && normR >= _s.GazeSingleEyeAbove;
         }
         var source = (useL ? 1 : 0) | (useR ? 2 : 0);
         if (source != _gazeSource)
