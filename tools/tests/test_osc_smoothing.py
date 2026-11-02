@@ -97,6 +97,22 @@ class EyeServerLayout(unittest.TestCase):
             self.assertIn("not available", sender.source_info(str(Path(temp) / "missing")))
 
 
+class LidWatchState(unittest.TestCase):
+    def test_stuck_lids_on_tracked_pupils_are_reported_but_closed_eyes_are_not(self):
+        def sample(lid, cov):
+            r = record(0, openness=(lid, lid))
+            r["cov"] = ((cov,) * 3,) * 2
+            return r
+        watch = sender.LidWatch()
+        self.assertFalse(watch.update(sample(0, 0.001), 0))
+        self.assertFalse(watch.update(sample(0, 0.001), 2.9))
+        self.assertTrue(watch.update(sample(0, 0.001), 3.1))
+        self.assertTrue(watch.update(sample(0, 0.006), 3.5), "a blink does not clear it")
+        self.assertFalse(watch.update(sample(1, 0.001), 3.6))
+        closed = sender.LidWatch()
+        self.assertFalse(any(closed.update(sample(0, 0.0045), i / 10) for i in range(100)))
+
+
 class OscSmoothing(unittest.TestCase):
     def test_noise_suppression_and_step_latency(self):
         for rate in (60, 90, 120):

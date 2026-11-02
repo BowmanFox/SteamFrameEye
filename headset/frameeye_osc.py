@@ -66,6 +66,9 @@ DEFAULT_POLL_MS = 4.0         # fallback polling interval when the futex wait is
 FUTEX_TIMEOUT_S = 0.004       # wake at least every poll interval (also covers a producer that never FUTEX_WAKEs)
 STALE_SECONDS = 1.5           # no new sample for this long -> "idle" (headset not worn / standby)
 REOPEN_SECONDS = 2.0
+LID_STUCK_SECONDS = 3.0       # both lids read closed this long on tracked pupils -> tell the wearer
+LID_CLOSED_BELOW = 0.3
+PUPIL_TRACKED_BELOW = 0.0025  # gaze covariance; closed eyes read 0.004 and more
 
 log = logging.getLogger("frameeye.sender")
 
@@ -312,6 +315,27 @@ def runtime_args(args):
     return out
 
 
+class LidWatch:
+    """True while the eye server reads both lids as closed on eyes whose pupils it tracks. That happens for
+    minutes after the headset goes back on, and adjusting the headset tends to end it. Real closed eyes do
+    not count, because they raise the gaze covariance."""
+
+    def __init__(self):
+        self.closed_since = None
+        self.tracked_at = None
+
+    def update(self, r, now):
+        if max(r["openness"]) >= LID_CLOSED_BELOW:
+            self.closed_since = None
+            return False
+        if self.closed_since is None:
+            self.closed_since = now
+        if min(max(r["cov"][0]), max(r["cov"][1])) < PUPIL_TRACKED_BELOW:
+            self.tracked_at = now
+        return (now - self.closed_since >= LID_STUCK_SECONDS
+                and self.tracked_at is not None and now - self.tracked_at < 1.0)
+
+
 class SenderRuntime:
     """Reads the eye server's shared memory in a thread and sends every new sample to the targets."""
 
@@ -324,6 +348,8 @@ class SenderRuntime:
         self.osc_smoothing = args.osc_smoothing
         self._osc_smoother = DirectOscSmoother()
         self._osc_mode = None
+        self._lid_watch = LidWatch()
+        self.lids_stuck = False
         self.prefix = args.prefix
         self.poll_s = max(0.001, args.poll_ms / 1000.0)
         self.mmap_path = args.mmap
@@ -359,6 +385,7 @@ class SenderRuntime:
         s["osc_target"] = "%s:%d" % self.osc_target if self.osc_target else None
         s["enabled"] = self.enabled
         s["osc_smoothing"] = self.osc_smoothing
+        s["lids_stuck"] = self.lids_stuck and s["state"] == "streaming"
         return s
 
     def set_targets(self, raw=None, osc="keep"):
@@ -376,6 +403,7 @@ class SenderRuntime:
         r = parse_record(mm, layout.record_offset)
         valid = record_valid(r, layout.guessed)
         errors = 0
+        self.lids_stuck = valid and self._lid_watch.update(r, time.monotonic())
         # Reset on pause/resume, target changes, or toggling the filter. Only this sender thread
         # touches filter history; the dashboard changes the simple configuration attributes.
         mode = (self.enabled, self.osc_target, self.osc_smoothing)

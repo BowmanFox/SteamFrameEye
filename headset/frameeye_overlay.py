@@ -267,10 +267,12 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
         lx, ly, rx, ry, cx, cy, lid_l, lid_r = values
         rows.append(("left", "gaze %+.2f %+.2f  lid %.2f" % (lx, ly, lid_l)))
         rows.append(("right", "gaze %+.2f %+.2f  lid %.2f" % (rx, ry, lid_r)))
+    if snapshot.get("lids_stuck"):
+        rows.append(("eyelids", "not read: adjust the headset"))
     y = 130
     for label, value in rows:
         panel.text(32, y, label.rjust(8), DIM)
-        panel.text(32 + 9 * CELL_W, y, value[:44], TEXT)
+        panel.text(32 + 9 * CELL_W, y, value[:44], WARN if label == "eyelids" else TEXT)
         y += CELL_H + 6
 
     active = state == "streaming" and values is not None

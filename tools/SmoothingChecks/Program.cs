@@ -165,12 +165,12 @@ Check(linkedBlink.OpenL == 0f && linkedBlink.OpenR == 0f, "linked eyelids still 
 (float minR, float minL, float endR, float endL) LinkedRight(Func<int, (float l, float r, float covR)> eyes, int samples)
 {
     var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
-    for (var i = 0; i < 90; i++) p.Process(Sample(i / 90.0));
+    for (var i = 0; i < 270; i++) p.Process(Sample(i / 90.0));   // past the settling time after the tracker locks on
     float minR = 1, minL = 1;
     for (var i = 0; i < samples; i++)
     {
         var (l, r, covR) = eyes(i);
-        var s = Sample(1 + i / 90.0, 0, 0, l, r);
+        var s = Sample(3 + i / 90.0, 0, 0, l, r);
         s.CovR = covR;
         var o = p.Process(s);
         minR = MathF.Min(minR, o.OpenR);
@@ -178,6 +178,8 @@ Check(linkedBlink.OpenL == 0f && linkedBlink.OpenR == 0f, "linked eyelids still 
     }
     return (minR, minL, p.Output.OpenR, p.Output.OpenL);
 }
+var briefWink = LinkedRight(i => i < 2 ? (1f, 0.5f, 0.0004f) : i < 40 ? (1f, 0.03f, 0.05f) : (1f, 0.03f, 0.002f), 62);
+var noWink = LinkedRight(i => i < 2 ? (1f, 0.5f, 0.0004f) : i < 16 ? (1f, 0.03f, 0.03f) : (1f, 1f, 0.0004f), 60);
 var heldWink = LinkedRight(i => i < 2 ? (0.9f, 0.5f, 0.0004f) : (0.55f, 0.03f, i % 7 == 0 ? 0.008f : 0.05f), 90);
 var misread = LinkedRight(i => (1f, i < 30 ? 1f - i / 30f : 0.03f, 0.004f), 180);
 var bothLidsRead = LinkedRight(i => i < 2 ? (0.9f, 0.5f, 0.0004f) : (0f, 0.03f, 0.05f), 90);
@@ -185,21 +187,24 @@ var staggered = LinkedRight(i => i < 23 ? (1f, 0f, 0.012f) : i < 45 ? (0f, 0f, 0
 Check(heldWink.endR == 0f && heldWink.endL > 0.4f, $"linked eyelids pass a wink through while the open eye narrows (open eye {heldWink.endL:F2})");
 Check(bothLidsRead.endR == 0f && bothLidsRead.endL == 1f,
     "linked eyelids show a wink when the open eye's lid also reads closed but its pupil is tracked");
+Check(briefWink.endR == 0f, "a wink the tracker reports briefly still shows for a moment");
+Check(noWink.minR > 0.9f, $"a one-sided dropout of 150 ms is not a wink ({noWink.minR:F2})");
 Check(misread.minR > 0.9f, $"linked eyelids keep an eye open whose lid is misread with its pupil tracked ({misread.minR:F2})");
 Check(MathF.Abs(staggered.minR - staggered.minL) < 0.01f, "linked eyelids keep a staggered blink (one eye first by 250 ms) together");
 
 // Lids stuck near closed: open and closed come from gaze and pupil tracking until the lids recover.
-EyeOutput Stuck(params (int samples, float lid, float covL, float covR, Func<int, float> yaw)[] phases)
+EyeOutput Stuck(params (int samples, float lid, float cov, Func<int, float> yaw, float apart, bool frozen)[] phases)
 {
     var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
     var n = 0;
-    foreach (var (samples, lid, covL, covR, yaw) in phases)
+    foreach (var (samples, lid, cov, yaw, apart, frozen) in phases)
     {
         for (var i = 0; i < samples; i++, n++)
         {
             var s = Sample(n / 90.0, yaw(i), 0, lid, lid);
-            s.CovL = covL;
-            s.CovR = covR;
+            s.LX = MathF.Tan(Rad(yaw(i) + apart / 2));
+            s.RX = MathF.Tan(Rad(yaw(i) - apart / 2));
+            s.CovL = s.CovR = frozen ? cov : cov * (1 + 0.01f * (n % 3));   // the live values change every sample
             p.Process(s);
         }
     }
@@ -207,20 +212,25 @@ EyeOutput Stuck(params (int samples, float lid, float covL, float covR, Func<int
 }
 static float Looking(int i) => i / 30 % 2 == 0 ? -6f : 6f;
 static float Still(int i) => -25f;
-var stuckOpen = Stuck((270, 0f, 0.001f, 0.001f, Looking));
-var stuckMoving = Stuck((270, 0f, 0.006f, 0.006f, Looking));
-var closedEyes = Stuck((90, 1f, 0.001f, 0.001f, Looking), (540, 0f, 0.02f, 0.02f, Still));
-var stuckThenClosed = Stuck((270, 0f, 0.001f, 0.001f, Looking), (270, 0f, 0.0045f, 0.0045f, Still));
-var stuckThenOpen = Stuck((270, 0f, 0.001f, 0.001f, Looking), (270, 0f, 0.0045f, 0.0045f, Still), (45, 0f, 0.001f, 0.001f, Looking));
-var notLocked = Stuck((180, 0f, 0.07f, 0.07f, Still));
-var recovered = Stuck((270, 0f, 0.001f, 0.001f, Looking), (90, 1f, 0.001f, 0.001f, Looking), (15, 0.03f, 0.001f, 0.001f, Looking));
+var stuckOpen = Stuck((270, 0f, 0.001f, Looking, 2f, false));
+var firstMoments = Stuck((3, 0f, 0.001f, Looking, 2f, false));
+var halfSetUp = Stuck((270, 0f, 0.006f, Still, 0.1f, false));
+var closedEyes = Stuck((90, 1f, 0.001f, Looking, 2f, false), (540, 0f, 0.02f, Still, 28f, false));
+var stuckThenClosed = Stuck((270, 0f, 0.001f, Looking, 2f, false), (20, 0f, 0.0045f, Still, 22f, false));
+var stuckThenOpen = Stuck((270, 0f, 0.001f, Looking, 2f, false), (270, 0f, 0.0045f, Still, 22f, false), (45, 0f, 0.001f, Looking, 2f, false));
+var stuckBlink = Stuck((270, 0f, 0.001f, Looking, 2f, false), (12, 0f, 0.001f, Looking, 2f, true));
+var stuckAfterBlink = Stuck((270, 0f, 0.001f, Looking, 2f, false), (22, 0f, 0.001f, Looking, 2f, true), (30, 0f, 0.001f, Looking, 2f, false));
+var notLocked = Stuck((180, 0f, 0.07f, Still, 0.1f, false));
+var recovered = Stuck((270, 0f, 0.001f, Looking, 2f, false), (90, 1f, 0.001f, Looking, 2f, false), (15, 0.03f, 0.001f, Looking, 2f, false));
 Check(stuckOpen.OpenL == 1f && stuckOpen.OpenR == 1f, "lids stuck on tracked pupils show open");
-Check(stuckMoving.OpenL == 1f, "lids stuck with raised covariance but a moving gaze show open");
+Check(firstMoments.OpenL == 1f && firstMoments.OpenR == 1f, "eyes show open from the first samples after the headset goes on");
+Check(halfSetUp.OpenL == 1f, "a still gaze with the gaze directions together shows open, however long it lasts");
 Check(MathF.Abs(stuckOpen.LeftX) > Rad(1), "gaze keeps following while the lids are stuck");
 Check(closedEyes.OpenL == 0f && closedEyes.OpenR == 0f, "really closed eyes stay closed for seconds");
-Check(stuckThenClosed.OpenL == 0f, "closing the eyes while the lids are stuck shows closed");
+Check(stuckThenClosed.OpenL == 0f, "closing the eyes while the lids are stuck shows closed within a quarter second");
 Check(stuckThenOpen.OpenL == 1f, "and opening them again shows open");
 Check(notLocked.OpenL == 1f && notLocked.OpenR == 1f, "eyes show open while the tracker has no lock");
+Check(stuckBlink.OpenL == 0f && stuckAfterBlink.OpenL == 1f, "a blink shows while the lids are stuck, and ends");
 Check(recovered.OpenL == 0f, "recovered lids drive blinks again");
 var cappedWink = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
 var capStart = 0f;

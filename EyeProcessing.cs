@@ -481,14 +481,17 @@ public sealed class LidPipeline
 /// <summary>Recognises a real wink for linked eyelids by the hidden pupil: the closing eye's gaze covariance rises
 /// (measured 0.02-0.13 in winks) while the other eye's stays below 0.01. The lids alone cannot tell: the eye server
 /// often reads the open eye's lid as closed too during a wink, while its pupil is still tracked; its one-sided lid
-/// misreads keep that pupil tracked (0.001, at most ~0.013), and in recorded blinks neither pupil showed as hidden
-/// while the other was visible for 100 ms. The wink lasts until the lid reopens, its pupil is tracked again, or the
-/// other pupil is hidden too, for 100 ms. After 5 s it is not a wink but one eye not tracked (the tracker locks on
-/// to each eye separately after the headset goes on), and it stays off until that pupil is tracked again.</summary>
+/// misreads keep that pupil tracked (0.001, at most ~0.013). Blinks and the right eye dropping out on open eyes can
+/// show the same pattern, but for less than 200 ms; real winks last longer. So does one eye settling first when the
+/// tracker locks on, so nothing counts for two seconds after that. A recognised wink shows for at least
+/// 600 ms, because the tracker often reports a held right wink only briefly, and otherwise lasts until the lid
+/// reopens, its pupil is tracked again, or the other pupil is hidden too, for 100 ms. After 5 s it is not a wink but
+/// one eye not tracked (the tracker locks on to each eye separately after the headset goes on), and it stays off
+/// until that pupil is tracked again.</summary>
 public sealed class WinkDetector
 {
     private const float HiddenAbove = 0.015f, VisibleBelow = 0.01f, ClosedBelow = 0.3f, EndAbove = 0.5f;
-    private const double ConfirmSeconds = 0.1, GapSeconds = 0.05, EndAfterSeconds = 0.1, MaxSeconds = 5;
+    private const double ConfirmSeconds = 0.2, GapSeconds = 0.05, EndAfterSeconds = 0.1, MinSeconds = 0.6, MaxSeconds = 5;
     private readonly float[] _covSelf = new float[3], _covOther = new float[3];
     private int _count;
     private double _candidateSince = double.NaN, _lastMatch, _endingSince = double.NaN, _activeSince;
@@ -506,7 +509,8 @@ public sealed class WinkDetector
 
     /// <param name="self">this eye's calibrated openness (before smoothing)</param>
     /// <param name="covSelf">this eye's gaze covariance (largest axis), <paramref name="covOther"/> the other eye's</param>
-    public bool Update(double t, float self, float covSelf, float covOther)
+    /// <param name="settled">the tracker has held its lock for a moment</param>
+    public bool Update(double t, float self, float covSelf, float covOther, bool settled)
     {
         _covSelf[_count % 3] = float.IsFinite(covSelf) ? covSelf : 1f;
         _covOther[_count % 3] = float.IsFinite(covOther) ? covOther : 1f;
@@ -529,7 +533,7 @@ public sealed class WinkDetector
         if (Active)
         {
             // Lids and covariances blip for a few samples; end only once the condition has held for 100 ms.
-            if (self < EndAbove && hidden >= VisibleBelow && visible < HiddenAbove)
+            if (t - _activeSince < MinSeconds || (self < EndAbove && hidden >= VisibleBelow && visible < HiddenAbove))
             {
                 _endingSince = double.NaN;
             }
@@ -544,7 +548,7 @@ public sealed class WinkDetector
             }
             return Active;
         }
-        if (hidden >= HiddenAbove && visible < VisibleBelow && self <= ClosedBelow)
+        if (settled && hidden >= HiddenAbove && visible < VisibleBelow && self <= ClosedBelow)
         {
             if (double.IsNaN(_candidateSince))
             {
@@ -570,58 +574,66 @@ public sealed class WinkDetector
 
 /// <summary>Works around the eye server's eyelid value sticking near 0 on open eyes. After the headset goes back on
 /// it can stay there for minutes, on both eyes, with the pupils perfectly tracked; moving the headset tends to end it.
-/// While it lasts the lids say nothing, so open and closed come from what still works. Measured in that state: open
-/// eyes keep the lower of the two gaze covariances near 0.001 or keep moving; closed eyes hold the gaze still with it
-/// at 0.004-0.04; a tracker that has not locked on after the headset went on, or lost an eye, reads above 0.04 on both
-/// eyes for up to a minute, and open is the better guess then. Lids closed with a still gaze and a raised covariance
-/// are simply closed eyes and never start this.</summary>
+/// It goes with a large difference between two of the undocumented record values (e1 - e3 above 0.4, below 0.25 with
+/// working lids), which suggests it depends on how the headset sits. While it lasts the lids say nothing, but other
+/// signals still do, as measured in that state:
+/// - closed eyes roll the two gaze directions apart: 21-28 degrees, with the lower gaze covariance raised (0.004-0.04);
+/// - open eyes keep that covariance near 0.001, or show it raised with the gaze directions under 2 degrees apart while
+///   the tracker is only half set up;
+/// - a blink freezes the whole record for about 245 ms;
+/// - a tracker without a lock reads above 0.04 on both eyes, for up to a minute after the headset goes on, and open is
+///   the better guess then.
+/// The lids are unproven after a gap in the data, so this starts out active and ends once they read open. Lids closed
+/// on eyes that look closed by the above are simply closed eyes and do not start it.</summary>
 public sealed class StuckLidRescue
 {
     private const float LidsClosedBelow = 0.3f, LidsBackAbove = 0.5f;
-    private const float TrackedBelow = 0.0025f, NotLockedAbove = 0.04f, SaccadeDegrees = 3f;
-    private const double EnterAfterSeconds = 1, LeaveAfterSeconds = 0.3, GazeStepSeconds = 0.1, OnsetSeconds = 0.3;
-    private const double BlinkSeconds = 0.5, StillSeconds = 0.6;
-    private readonly float[] _cov = new float[3];
-    private int _count, _samples, _evidence;
-    private double _closedSince = double.NaN, _backSince = double.NaN, _raisedSince = double.NaN;
-    private double _notLockedSince = double.NaN;
-    private double _gazeMarkTime = double.NegativeInfinity, _lastSaccade = double.NegativeInfinity;
-    private float _gazeMarkX, _gazeMarkY;
+    private const float TrackedBelow = 0.0025f, NotLockedAbove = 0.04f, ClosedVergenceDegrees = 15f;
+    private const double EnterAfterSeconds = 1, LeaveAfterSeconds = 0.3, ClosedHoldSeconds = 0.08, FlickerSeconds = 0.2;
+    private const int FreezeSamples = 9;
+    private readonly float[] _cov = new float[3], _vergence = new float[3];
+    private int _count, _samples, _looksOpen, _frozen;
+    private float _lastCovL = float.NaN, _lastCovR = float.NaN;
+    private double _closedSince = double.NaN, _backSince = double.NaN, _notLockedSince = double.NaN, _lidsLow;
+    private double _closedUntil = double.NegativeInfinity;
 
-    public bool Active { get; private set; }
+    public bool Active { get; private set; } = true;
     public bool ShowClosed { get; private set; }
 
     public void Reset()
     {
-        _count = _samples = _evidence = 0;
-        _closedSince = _backSince = _raisedSince = _notLockedSince = double.NaN;
-        _gazeMarkTime = _lastSaccade = double.NegativeInfinity;
-        Active = ShowClosed = false;
+        _count = _samples = _looksOpen = _frozen = 0;
+        _lastCovL = _lastCovR = float.NaN;
+        _closedSince = _backSince = _notLockedSince = double.NaN;
+        _closedUntil = double.NegativeInfinity;
+        Active = true;
+        ShowClosed = false;
     }
 
     /// <param name="lids">calibrated openness of the more open eye</param>
-    /// <param name="gazeX">fused gaze yaw in degrees, <paramref name="gazeY"/> pitch</param>
-    public void Update(double t, float lids, float covL, float covR, float gazeX, float gazeY)
+    /// <param name="vergence">angle between the two fused gaze directions, in degrees</param>
+    public void Update(double t, float lids, float covL, float covR, float vergence)
     {
-        var lower = MathF.Min(float.IsFinite(covL) ? covL : 1f, float.IsFinite(covR) ? covR : 1f);
-        _cov[_count % 3] = lower;
+        _frozen = covL == _lastCovL && covR == _lastCovR ? _frozen + 1 : 0;
+        (_lastCovL, _lastCovR) = (covL, covR);
+        _cov[_count % 3] = MathF.Min(float.IsFinite(covL) ? covL : 1f, float.IsFinite(covR) ? covR : 1f);
+        _vergence[_count % 3] = vergence;
         _count++;
-        var cov = _count < 3 ? lower : MathF.Max(MathF.Min(_cov[0], _cov[1]), MathF.Min(MathF.Max(_cov[0], _cov[1]), _cov[2]));
-
-        if (t - _gazeMarkTime >= GazeStepSeconds)
-        {
-            if (MathF.Sqrt(Sq(gazeX - _gazeMarkX) + Sq(gazeY - _gazeMarkY)) >= SaccadeDegrees)
-            {
-                _lastSaccade = t;
-            }
-            (_gazeMarkTime, _gazeMarkX, _gazeMarkY) = (t, gazeX, gazeY);
-        }
+        var cov = _count < 3 ? _cov[_count - 1] : Median3(_cov);
+        var apart = _count < 3 ? vergence : Median3(_vergence);
 
         var notLocked = cov >= NotLockedAbove;
         _notLockedSince = !notLocked ? double.NaN : double.IsNaN(_notLockedSince) ? t : _notLockedSince;
+        var closedLook = cov >= TrackedBelow && !notLocked && apart >= ClosedVergenceDegrees;
+        var blink = _frozen >= FreezeSamples;
+        if (closedLook || blink)
+        {
+            _closedUntil = t + ClosedHoldSeconds;
+        }
 
         if (Active)
         {
+            ShowClosed = t < _closedUntil;
             if (lids < LidsBackAbove || notLocked)
             {
                 _backSince = double.NaN;
@@ -633,56 +645,42 @@ public sealed class StuckLidRescue
             else if (t - _backSince >= LeaveAfterSeconds)
             {
                 Active = ShowClosed = false;
-                _closedSince = _backSince = _raisedSince = double.NaN;
-                return;
+                _closedSince = _backSince = double.NaN;
             }
-            if (cov < TrackedBelow || notLocked)
-            {
-                _raisedSince = double.NaN;
-                ShowClosed = false;
-                return;
-            }
-            if (double.IsNaN(_raisedSince))
-            {
-                _raisedSince = t;
-            }
-            // Short: a blink. Longer: closed only while the gaze holds still.
-            ShowClosed = t - _raisedSince < BlinkSeconds || t - _lastSaccade >= StillSeconds;
             return;
         }
 
-        // Lids mean nothing without a lock, whatever they read.
         if (notLocked && t - _notLockedSince >= EnterAfterSeconds)
         {
             Active = true;
-            _backSince = _raisedSince = double.NaN;
+            _backSince = double.NaN;
             return;
         }
+        // The lids flicker up in this state; only a real recovery stops the clock.
         if (lids >= LidsClosedBelow)
         {
-            _closedSince = double.NaN;
+            if (t - _lidsLow >= FlickerSeconds)
+            {
+                _closedSince = double.NaN;
+            }
             return;
         }
+        _lidsLow = t;
         if (double.IsNaN(_closedSince))
         {
             _closedSince = t;
-            _samples = _evidence = 0;
+            _samples = _looksOpen = 0;
         }
         _samples++;
-        if (cov < TrackedBelow)
-        {
-            _evidence++;
-        }
-        // The gaze jumps as the lids close; only movement after that counts.
-        var moved = _lastSaccade >= _closedSince + OnsetSeconds;
-        if (t - _closedSince >= EnterAfterSeconds && (moved || _evidence * 2 >= _samples))
+        _looksOpen += closedLook || blink ? 0 : 1;
+        if (t - _closedSince >= EnterAfterSeconds && _looksOpen * 2 >= _samples)
         {
             Active = true;
-            _backSince = _raisedSince = double.NaN;
+            _backSince = double.NaN;
         }
     }
 
-    private static float Sq(float v) => v * v;
+    private static float Median3(float[] v) => MathF.Max(MathF.Min(v[0], v[1]), MathF.Min(MathF.Max(v[0], v[1]), v[2]));
 }
 
 /// <summary>Turns SFEY samples into VRCFaceTracking eye values.</summary>
@@ -692,6 +690,7 @@ public sealed class EyeProcessor
     private readonly GazeSmoother _leftGaze, _rightGaze;
     private readonly WinkDetector _winkL = new(), _winkR = new();
     private readonly StuckLidRescue _rescue = new();
+    private double _lockedSince = double.NaN;
     private int _gazeSource;
     private double _lastTime = double.NaN;
     private EyeOutput _out = new() { OpenL = 1f, OpenR = 1f };
@@ -704,14 +703,14 @@ public sealed class EyeProcessor
     /// <summary>Samples where at least one eye's gaze was not tracked (closed eye, blink bottom or poor fit).</summary>
     public long UnreliableSamples { get; private set; }
     public long ReliableSamples { get; private set; }
-    /// <summary>Samples and episodes where the lids were ignored because they stuck near closed.</summary>
+    /// <summary>Samples where the lids were ignored because they stuck near closed.</summary>
     public long RescueSamples { get; private set; }
-    public long RescueEpisodes { get; private set; }
     private double _unreliableSince = double.NaN;
     // Share of reliable samples over the last ~2 s. The bottom of a deep blink also raises the covariance
     // (the pupil is hidden), so learning follows this ratio instead of single samples.
     private float _reliability = 0.5f;
-    private const float ReliabilitySeconds = 2f, LearnAboveReliability = 0.8f;
+    private const float ReliabilitySeconds = 2f, LearnAboveReliability = 0.8f, NoLockAbove = 0.04f;
+    private const double LockSettleSeconds = 2;
     private const double DropDipAfterUnreliableMs = 400;
 
     /// <param name="saved">calibration saved by an earlier session (ToJson), used as the starting point in "auto"</param>
@@ -752,6 +751,7 @@ public sealed class EyeProcessor
             Right.Reset();
             _winkL.Reset(); _winkR.Reset();
             _rescue.Reset();
+            _lockedSince = double.NaN;
             _leftGaze.Reset(); _rightGaze.Reset();
             _gazeSource = 0;
             dt = 1 / 90.0;
@@ -787,22 +787,24 @@ public sealed class EyeProcessor
         }
         _reliability += fdt / (ReliabilitySeconds + fdt) * ((reliable ? 1f : 0f) - _reliability);
         var trusted = _reliability > LearnAboveReliability;
-        var sustainedBad = _rescue.Active || (!reliable && (x.SampleTime - _unreliableSince) * 1000 >= DropDipAfterUnreliableMs);
+        var sustainedBad = Rescuing || (!reliable && (x.SampleTime - _unreliableSince) * 1000 >= DropDipAfterUnreliableMs);
         _out.OpenL = Left.Process(x.OpenL, x.SampleTime, fdt, _pitchDeg, _s, trusted, sustainedBad);
         _out.OpenR = Right.Process(x.OpenR, x.SampleTime, fdt, _pitchDeg, _s, trusted, sustainedBad);
         var linked = _s.Eyelids == "linked";
-        var winkL = linked && _winkL.Update(x.SampleTime, Left.Normalized, x.CovL, x.CovR);
-        var winkR = linked && _winkR.Update(x.SampleTime, Right.Normalized, x.CovR, x.CovL);
+        if (MathF.Min(x.CovL, x.CovR) >= NoLockAbove || double.IsNaN(_lockedSince))
+        {
+            _lockedSince = x.SampleTime;
+        }
+        var settled = x.SampleTime - _lockedSince >= LockSettleSeconds;
+        var winkL = linked && _winkL.Update(x.SampleTime, Left.Normalized, x.CovL, x.CovR, settled);
+        var winkR = linked && _winkR.Update(x.SampleTime, Right.Normalized, x.CovR, x.CovL, settled);
         if (linked && _s.LidRescue)
         {
-            var wasActive = _rescue.Active;
-            _rescue.Update(x.SampleTime, MathF.Max(Left.Normalized, Right.Normalized), x.CovL, x.CovR,
-                cx * 180f / MathF.PI, cy * 180f / MathF.PI);
-            RescueEpisodes += _rescue.Active && !wasActive ? 1 : 0;
+            _rescue.Update(x.SampleTime, MathF.Max(Left.Normalized, Right.Normalized), x.CovL, x.CovR, Vergence(x));
             RescueSamples += _rescue.Active ? 1 : 0;
         }
         // During a recognised wink the open eye narrows, often below blink_sync_below; it must not be closed with it.
-        if (_s.BlinkSync && !winkL && !winkR && !_rescue.Active)
+        if (_s.BlinkSync && !winkL && !winkR && !Rescuing)
         {
             // Blinks are bilateral; the Frame sometimes tracks one eye's closure less deep than the other's.
             if (_out.OpenL <= 0f && Right.Normalized < _s.BlinkSyncBelow)
@@ -821,20 +823,12 @@ public sealed class EyeProcessor
         switch (_s.Eyelids)
         {
             case "linked" when winkL || winkR:
-                // A wink: the closed eye keeps its own value. The open eye's pupil is tracked, so it is open even when
-                // the eye server reads its lid as closed as well, which it often does during a wink.
-                if (winkL)
-                {
-                    _out.OpenR = 1f;
-                    normR = MathF.Max(normR, 1f);
-                }
-                else
-                {
-                    _out.OpenL = 1f;
-                    normL = MathF.Max(normL, 1f);
-                }
+                // A wink: the open eye's pupil is tracked, so it is open even when the eye server reads its lid as
+                // closed as well, which it often does during a wink. The closed eye's lid value flickers meanwhile.
+                _out.OpenL = normL = winkL ? 0f : 1f;
+                _out.OpenR = normR = winkL ? 1f : 0f;
                 break;
-            case "linked" when _rescue.Active:
+            case "linked" when Rescuing:
                 _out.OpenL = _out.OpenR = normL = normR = _rescue.ShowClosed ? 0f : 1f;
                 break;
             case "linked":
@@ -917,6 +911,16 @@ public sealed class EyeProcessor
         _out.RightX = rx * _s.GazeScale;
         _out.RightY = ry * _s.GazeScale;
         return _out;
+    }
+
+    private bool Rescuing => _s.Eyelids == "linked" && _s.LidRescue && _rescue.Active;
+
+    /// <summary>Angle between the two fused gaze directions, in degrees.</summary>
+    private static float Vergence(in EyeSample x)
+    {
+        var length = MathF.Sqrt((x.LX * x.LX + x.LY * x.LY + x.LZ * x.LZ) * (x.RX * x.RX + x.RY * x.RY + x.RZ * x.RZ));
+        var angle = MathF.Acos(Math.Clamp((x.LX * x.RX + x.LY * x.RY + x.LZ * x.RZ) / length, -1f, 1f));
+        return float.IsFinite(angle) ? angle * 180f / MathF.PI : 0f;
     }
 
     private bool Tracked(float cov) => _s.QualityLimit <= 0f || (float.IsFinite(cov) && cov < _s.QualityLimit);
