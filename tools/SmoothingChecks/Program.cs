@@ -145,15 +145,16 @@ Lid(0.8f, 30);
 Check(lids.Output.OpenL > 0.75f, $"a raw 0.8 lid shows mostly open ({lids.Output.OpenL:F2})");
 
 // One lid misread as closed for seconds: linked eyelids keep both open, a real blink still closes both.
-EyeOutput Lids(string mode, float openL, float openR)
+EyeOutput Lids(string mode, float openL, float openR, int samples = 270)
 {
     var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = mode });
-    for (var i = 0; i < 270; i++) p.Process(Sample(i / 90.0, 0, 0, openL, openR));
+    for (var i = 0; i < 45; i++) p.Process(Sample(i / 90.0));
+    for (var i = 45; i < 45 + samples; i++) p.Process(Sample(i / 90.0, 0, 0, openL, openR));
     return p.Output;
 }
 var perEyeSag = Lids("per_eye", 1f, 0.1f);
 var linkedSag = Lids("linked", 1f, 0.1f);
-var linkedBlink = Lids("linked", 0.05f, 0.05f);
+var linkedBlink = Lids("linked", 0.05f, 0.05f, 30);
 var leftOnly = Lids("left", 1f, 0.1f);
 Check(perEyeSag.OpenR == 0f && linkedSag.OpenL == 1f && linkedSag.OpenR == 1f && leftOnly.OpenR == 1f,
     "linked/left eyelids keep an eye open that the headset misreads as closed");
@@ -187,14 +188,60 @@ Check(bothLidsRead.endR == 0f && bothLidsRead.endL == 1f,
 Check(misread.minR > 0.9f, $"linked eyelids keep an eye open whose lid is misread with its pupil tracked ({misread.minR:F2})");
 Check(MathF.Abs(staggered.minR - staggered.minL) < 0.01f, "linked eyelids keep a staggered blink (one eye first by 250 ms) together");
 
+// Lids stuck near closed: open and closed come from gaze and pupil tracking until the lids recover.
+EyeOutput Stuck(params (int samples, float lid, float covL, float covR, Func<int, float> yaw)[] phases)
+{
+    var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
+    var n = 0;
+    foreach (var (samples, lid, covL, covR, yaw) in phases)
+    {
+        for (var i = 0; i < samples; i++, n++)
+        {
+            var s = Sample(n / 90.0, yaw(i), 0, lid, lid);
+            s.CovL = covL;
+            s.CovR = covR;
+            p.Process(s);
+        }
+    }
+    return p.Output;
+}
+static float Looking(int i) => i / 30 % 2 == 0 ? -6f : 6f;
+static float Still(int i) => -25f;
+var stuckOpen = Stuck((270, 0f, 0.001f, 0.001f, Looking));
+var stuckMoving = Stuck((270, 0f, 0.006f, 0.006f, Looking));
+var closedEyes = Stuck((90, 1f, 0.001f, 0.001f, Looking), (540, 0f, 0.02f, 0.02f, Still));
+var stuckThenClosed = Stuck((270, 0f, 0.001f, 0.001f, Looking), (270, 0f, 0.0045f, 0.0045f, Still));
+var stuckThenOpen = Stuck((270, 0f, 0.001f, 0.001f, Looking), (270, 0f, 0.0045f, 0.0045f, Still), (45, 0f, 0.001f, 0.001f, Looking));
+var notLocked = Stuck((180, 0f, 0.07f, 0.07f, Still));
+var recovered = Stuck((270, 0f, 0.001f, 0.001f, Looking), (90, 1f, 0.001f, 0.001f, Looking), (15, 0.03f, 0.001f, 0.001f, Looking));
+Check(stuckOpen.OpenL == 1f && stuckOpen.OpenR == 1f, "lids stuck on tracked pupils show open");
+Check(stuckMoving.OpenL == 1f, "lids stuck with raised covariance but a moving gaze show open");
+Check(MathF.Abs(stuckOpen.LeftX) > Rad(1), "gaze keeps following while the lids are stuck");
+Check(closedEyes.OpenL == 0f && closedEyes.OpenR == 0f, "really closed eyes stay closed for seconds");
+Check(stuckThenClosed.OpenL == 0f, "closing the eyes while the lids are stuck shows closed");
+Check(stuckThenOpen.OpenL == 1f, "and opening them again shows open");
+Check(notLocked.OpenL == 1f && notLocked.OpenR == 1f, "eyes show open while the tracker has no lock");
+Check(recovered.OpenL == 0f, "recovered lids drive blinks again");
+var cappedWink = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
+var capStart = 0f;
+for (var i = 0; i < 720; i++)
+{
+    var s = Sample(i / 90.0, 0, 0, i < 90 ? 1f : 0f, 1f);
+    s.CovL = i < 90 ? 0.001f : 0.06f;
+    s.CovR = 0.001f;
+    var o = cappedWink.Process(s);
+    if (i == 270) capStart = o.OpenL;
+}
+Check(capStart == 0f && cappedWink.Output.OpenL == 1f, "one eye lost for seconds stops counting as a wink");
+
 var path = Path.Combine(Path.GetTempPath(), $"frameeye-settings-{Guid.NewGuid():N}.json");
 try
 {
-    File.WriteAllText(path, """{"smoothing":true,"gaze_median_filter":false,"gaze_min_cutoff":0.6,"gaze_beta":4,"eyelids":"Linked"}""");
+    File.WriteAllText(path, """{"smoothing":true,"gaze_median_filter":false,"gaze_min_cutoff":0.6,"gaze_beta":4,"eyelids":"Linked","lid_rescue":false}""");
     var loaded = EyeSettings.Load(path, Console.WriteLine);
     Check(loaded.Smoothing && !loaded.GazeMedianFilter && loaded.GazeMinCutoff == 0.6f && loaded.GazeBeta == 4,
         "JSON settings control gaze smoothing");
-    Check(loaded.Eyelids == "linked", "JSON settings select linked eyelids");
+    Check(loaded.Eyelids == "linked" && !loaded.LidRescue, "JSON settings select linked eyelids and the lid rescue");
 }
 finally { File.Delete(path); }
 
