@@ -45,7 +45,7 @@ public class SteamFrameEyeModule : ExtTrackingModule
     private bool _have;
     private DateTime _lastRx = DateTime.MinValue;
     private long _rxCount, _badCount;
-    private bool _loggedFirst, _loggedStale;
+    private bool _loggedFirst, _loggedStale, _winksOff;
     private DateTime _nextSave, _nextCalibrationLog;
 
     public override (bool SupportsEye, bool SupportsExpression) Supported => (true, false);
@@ -87,7 +87,8 @@ public class SteamFrameEyeModule : ExtTrackingModule
             "SteamFrameEye: listening on UDP {Port}; on the headset, enter this PC's address in FrameEye Bridge. " +
             "Gaze {Gaze}, eyelids {Eyelids}, smoothing {Smoothing}, calibration {Calibration} ({Lids})",
             _settings.Port, _settings.CombinedGaze ? "combined" : "per eye",
-            _settings.Eyelids == "linked" ? "linked (winks pass)" : _settings.Eyelids.Replace('_', ' '),
+            _settings.Eyelids != "linked" ? _settings.Eyelids.Replace('_', ' ')
+                : _settings.WinkDetection ? "linked, wink detection on" : "linked, wink detection off",
             _settings.Smoothing ? "on" : "off", _settings.Calibration, DescribeLids(_processor));
         if (_settings.Smoothing)
         {
@@ -196,6 +197,11 @@ public class SteamFrameEyeModule : ExtTrackingModule
             {
                 continue;
             }
+            if (s.WinksOff != _winksOff)
+            {
+                _winksOff = s.WinksOff;
+                Logger.LogInformation("SteamFrameEye: wink detection switched {State} on the headset", _winksOff ? "off" : "on");
+            }
             var o = processor.Process(s);
             lock (_lock)
             {
@@ -264,7 +270,7 @@ public class SteamFrameEyeModule : ExtTrackingModule
     }
 
     /// <summary>
-    /// Packet (little-endian, 96 bytes): "SFEY", u16 version, u16 flags (bit0 = valid), u32 seq,
+    /// Packet (little-endian, 96 bytes): "SFEY", u16 version, u16 flags (bit0 = valid, bit1 = wink detection off), u32 seq,
     /// f64 sample_time, f32 gazeL[3], gazeR[3], fixation[3], openness L, openness R,
     /// f32 covL[3], covR[3], f64 send_time.
     /// </summary>
@@ -280,6 +286,7 @@ public class SteamFrameEyeModule : ExtTrackingModule
             return false;
         }
         var flags = BinaryPrimitives.ReadUInt16LittleEndian(b.Slice(6));
+        s.WinksOff = (flags & 2) != 0;
         s.SampleTime = BinaryPrimitives.ReadDoubleLittleEndian(b.Slice(12));
         s.LX = ReadF(b, 0); s.LY = ReadF(b, 1); s.LZ = ReadF(b, 2);
         s.RX = ReadF(b, 3); s.RY = ReadF(b, 4); s.RZ = ReadF(b, 5);

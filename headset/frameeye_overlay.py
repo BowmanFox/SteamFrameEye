@@ -63,7 +63,7 @@ ICON = os.path.join(HERE, "icon.png")
 DEFAULT_LOG = os.path.join(HERE, "frameeye_overlay.log")
 LOCK = os.path.join(HERE, "frameeye_overlay.lock")
 
-PANEL_W, PANEL_H = 640, 628
+PANEL_W, PANEL_H = 640, 688
 VR_RETRY_SECONDS = 5.0
 REDRAW_SECONDS = 0.04         # GL path, tab visible: up to 25 Hz, driven by new samples
 REDRAW_SECONDS_RAW = 0.5      # SetOverlayRaw fallback (each upload blanks a frame)
@@ -189,11 +189,12 @@ ROW_SENDING = (32, 376, 608, 428)      # whole row is clickable
 ROW_ADDRESS = (32, 436, 608, 480)
 ROW_VRCHAT = (32, 488, 608, 540)
 ROW_SMOOTHING = (32, 548, 608, 600)
+ROW_WINKS = (32, 608, 608, 660)
 TOGGLE_X0, TOGGLE_X1 = 496, 608
 FIELD_X0, FIELD_X1 = 200, 608
 CAPTION_CHARS = (TOGGLE_X0 - 8 - 32) // CELL_W
 CONTROLS = (("sending", ROW_SENDING), ("address", ROW_ADDRESS), ("vrchat", ROW_VRCHAT),
-            ("smoothing", ROW_SMOOTHING))
+            ("smoothing", ROW_SMOOTHING), ("winks", ROW_WINKS))
 
 
 def control_at(x, y):
@@ -317,6 +318,11 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
     panel.text(32, y0 + 27, "Steadier gaze and eyelids" if settings.target else "Used when direct OSC is on", DIM)
     draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, settings.osc_smoothing, hot == "smoothing")
 
+    x0, y0, x1, y1 = ROW_WINKS
+    panel.text(32, y0 + 4, "Wink detection", TEXT)
+    panel.text(32, y0 + 27, "One eye can close alone" if settings.wink_detection else "Both eyes always match", DIM)
+    draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, settings.wink_detection, hot == "winks")
+
 
 # ----------------------------------------------------------------------------- settings
 
@@ -328,6 +334,7 @@ class Settings:
         self.target = args.target if args.target and args.target != "none" else None
         self.enabled = True
         self.osc_smoothing = args.osc_smoothing
+        self.wink_detection = True
         self.mouse_origin_bottom = True   # OpenVR mouse events are in GL space (0,0 = bottom left)
         cfg = load_config()
         if isinstance(cfg.get("raw"), list):
@@ -338,19 +345,22 @@ class Settings:
             self.enabled = bool(cfg["enabled"])
         if isinstance(cfg.get("osc_smoothing"), bool):
             self.osc_smoothing = cfg["osc_smoothing"]
+        if isinstance(cfg.get("wink_detection"), bool):
+            self.wink_detection = cfg["wink_detection"]
         if "mouse_origin_bottom" in cfg:
             self.mouse_origin_bottom = bool(cfg["mouse_origin_bottom"])
 
     def save(self):
         cfg = load_config()
         cfg.update({"raw": self.raw, "target": self.target, "enabled": self.enabled,
-                    "osc_smoothing": self.osc_smoothing})
+                    "osc_smoothing": self.osc_smoothing, "wink_detection": self.wink_detection})
         save_config(cfg)
 
     def apply(self, runtime):
         runtime.set_targets(raw=self.raw, osc=self.target)
         runtime.enabled = self.enabled
         runtime.osc_smoothing = self.osc_smoothing
+        runtime.wink_detection = self.wink_detection
 
     def pc_host(self):
         return self.raw[0].rsplit(":", 1)[0] if self.raw else None
@@ -564,6 +574,12 @@ class OverlayApp:
         self.settings.save()
         log.info("direct OSC smoothing %s", "on" if self.settings.osc_smoothing else "off")
 
+    def toggle_winks(self):
+        self.settings.wink_detection = not self.settings.wink_detection
+        self.runtime.wink_detection = self.settings.wink_detection
+        self.settings.save()
+        log.info("wink detection %s", "on" if self.settings.wink_detection else "off")
+
     def edit_address(self):
         existing = self.settings.raw[0] if self.settings.raw else ""
         try:
@@ -629,6 +645,8 @@ class OverlayApp:
             self.edit_address()
         elif cid == "smoothing":
             self.toggle_smoothing()
+        elif cid == "winks":
+            self.toggle_winks()
         self.dirty = True
 
     def handle_events(self):

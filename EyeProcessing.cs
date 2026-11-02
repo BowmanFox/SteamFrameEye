@@ -12,6 +12,7 @@ public struct EyeSample
     public float FX, FY, FZ;               // fixation point
     public float OpenL, OpenR;             // raw eyelid openness from the eye server, 0..1
     public float CovL, CovR;               // largest gaze covariance component per eye (tracking quality)
+    public bool WinksOff;                  // the wink switch in the headset's dashboard tab is off
 }
 
 /// <summary>Processed values in VRCFaceTracking units: gaze in radians (the scale the Steam Link module
@@ -42,6 +43,7 @@ public sealed class EyeSettings
     // "per_eye" (winks), "linked" (both eyes show the more open one: a lid the eye server misreads as closed on
     // one side no longer shuts that eye, blinks still close both, winks are lost), "left"/"right" (both follow one eye).
     public string Eyelids = "per_eye";
+    public bool WinkDetection = true;      // linked eyelids: let recognised winks through, see WinkDetector
     public bool LidRescue = true;          // linked eyelids: ignore lids stuck near closed, see StuckLidRescue
     public int BlinkHoldMs = 80;
     public float GazeHoldBelow = 0.6f;     // an eye's gaze is only used while its openness is at least this
@@ -96,6 +98,7 @@ public sealed class EyeSettings
             s.BlinkSyncBelow = Math.Clamp(Float("blink_sync_below", s.BlinkSyncBelow), 0f, 0.9f);
             var lids = Str("eyelids", s.Eyelids).ToLowerInvariant();
             s.Eyelids = lids is "per_eye" or "linked" or "left" or "right" ? lids : "per_eye";
+            s.WinkDetection = Bool("wink_detection", s.WinkDetection);
             s.LidRescue = Bool("lid_rescue", s.LidRescue);
             s.BlinkHoldMs = Math.Clamp(Int("blink_hold_ms", s.BlinkHoldMs), 0, 500);
             s.GazeHoldBelow = Math.Clamp(Float("gaze_hold_below", s.GazeHoldBelow), 0f, 1f);
@@ -796,8 +799,14 @@ public sealed class EyeProcessor
             _lockedSince = x.SampleTime;
         }
         var settled = x.SampleTime - _lockedSince >= LockSettleSeconds;
-        var winkL = linked && _winkL.Update(x.SampleTime, Left.Normalized, x.CovL, x.CovR, settled);
-        var winkR = linked && _winkR.Update(x.SampleTime, Right.Normalized, x.CovR, x.CovL, settled);
+        var winks = linked && _s.WinkDetection && !x.WinksOff;
+        if (!winks)
+        {
+            _winkL.Reset();
+            _winkR.Reset();
+        }
+        var winkL = winks && _winkL.Update(x.SampleTime, Left.Normalized, x.CovL, x.CovR, settled);
+        var winkR = winks && _winkR.Update(x.SampleTime, Right.Normalized, x.CovR, x.CovL, settled);
         if (linked && _s.LidRescue)
         {
             _rescue.Update(x.SampleTime, MathF.Max(Left.Normalized, Right.Normalized), x.CovL, x.CovR, Vergence(x));

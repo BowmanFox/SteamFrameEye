@@ -192,6 +192,25 @@ Check(noWink.minR > 0.9f, $"a one-sided dropout of 150 ms is not a wink ({noWink
 Check(misread.minR > 0.9f, $"linked eyelids keep an eye open whose lid is misread with its pupil tracked ({misread.minR:F2})");
 Check(MathF.Abs(staggered.minR - staggered.minL) < 0.01f, "linked eyelids keep a staggered blink (one eye first by 250 ms) together");
 
+// The wink switch: off in the settings file or on the headset, a one-sided closure stays linked, also mid-wink.
+EyeOutput WinkSwitch(bool settingOn, int packetOffFrom)
+{
+    var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked", WinkDetection = settingOn });
+    for (var i = 0; i < 270; i++) p.Process(Sample(i / 90.0));
+    for (var i = 0; i < 60; i++)
+    {
+        var s = Sample(3 + i / 90.0, 0, 0, 1f, 0.03f);
+        s.CovR = 0.05f;
+        s.WinksOff = i >= packetOffFrom;
+        p.Process(s);
+    }
+    return p.Output;
+}
+Check(WinkSwitch(true, 999).OpenR == 0f, "the wink switch on lets winks through");
+Check(WinkSwitch(false, 999).OpenR == 1f, "wink_detection false keeps both eyes together");
+Check(WinkSwitch(true, 0).OpenR == 1f, "the headset's wink switch off keeps both eyes together");
+Check(WinkSwitch(true, 40).OpenR == 1f, "switching winks off ends a wink in progress");
+
 // Lids stuck near closed: open and closed come from gaze and pupil tracking until the lids recover.
 EyeOutput Stuck(params (int samples, float lid, float cov, Func<int, float> yaw, float apart, bool frozen)[] phases)
 {
@@ -247,11 +266,11 @@ Check(capStart == 0f && cappedWink.Output.OpenL == 1f, "one eye lost for seconds
 var path = Path.Combine(Path.GetTempPath(), $"frameeye-settings-{Guid.NewGuid():N}.json");
 try
 {
-    File.WriteAllText(path, """{"smoothing":true,"gaze_median_filter":false,"gaze_min_cutoff":0.6,"gaze_beta":4,"eyelids":"Linked","lid_rescue":false}""");
+    File.WriteAllText(path, """{"smoothing":true,"gaze_median_filter":false,"gaze_min_cutoff":0.6,"gaze_beta":4,"eyelids":"Linked","lid_rescue":false,"wink_detection":false}""");
     var loaded = EyeSettings.Load(path, Console.WriteLine);
     Check(loaded.Smoothing && !loaded.GazeMedianFilter && loaded.GazeMinCutoff == 0.6f && loaded.GazeBeta == 4,
         "JSON settings control gaze smoothing");
-    Check(loaded.Eyelids == "linked" && !loaded.LidRescue, "JSON settings select linked eyelids and the lid rescue");
+    Check(loaded.Eyelids == "linked" && !loaded.LidRescue && !loaded.WinkDetection, "JSON settings select linked eyelids, the lid rescue and wink detection");
 }
 finally { File.Delete(path); }
 
