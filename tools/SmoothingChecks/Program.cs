@@ -251,6 +251,35 @@ Check(stuckThenOpen.OpenL == 1f, "and opening them again shows open");
 Check(notLocked.OpenL == 1f && notLocked.OpenR == 1f, "eyes show open while the tracker has no lock");
 Check(stuckBlink.OpenL == 0f && stuckAfterBlink.OpenL == 1f, "a blink shows while the lids are stuck, and ends");
 Check(recovered.OpenL == 0f, "recovered lids drive blinks again");
+// The symmetry switch: off, each eyelid follows its own reading, except while the lids are stuck.
+EyeOutput Symmetry(string mode, bool off, float left, float right, float covRight = 0.0004f)
+{
+    var p = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = mode });
+    for (var i = 0; i < 270; i++) p.Process(Sample(i / 90.0));
+    for (var i = 0; i < 60; i++)
+    {
+        var s = Sample(3 + i / 90.0, 0, 0, left, right);
+        s.CovR = covRight * (1 + 0.01f * (i % 3));
+        s.SymmetryOff = off;
+        p.Process(s);
+    }
+    return p.Output;
+}
+Check(Symmetry("linked", false, 1f, 0.1f).OpenR == 1f, "symmetry on matches a lid read as closed to the open one");
+Check(Symmetry("linked", true, 1f, 0.1f) is { OpenL: 1f, OpenR: 0f }, "symmetry off lets each eyelid follow its own reading");
+Check(Symmetry("left", true, 1f, 0.1f) is { OpenL: 1f, OpenR: 0f } && Symmetry("right", true, 1f, 0.1f) is { OpenL: 1f, OpenR: 0f },
+    "symmetry off also applies to the left and right eyelid modes");
+Check(Symmetry("linked", true, 1f, 0.03f, 0.05f) is { OpenL: 1f, OpenR: 0f }, "a wink shows with symmetry off");
+var stuckApart = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
+for (var i = 0; i < 270; i++)
+{
+    var s = Sample(i / 90.0, Looking(i), 0, 0f, 0f);
+    s.CovL = s.CovR = 0.001f * (1 + 0.01f * (i % 3));
+    s.SymmetryOff = true;
+    stuckApart.Process(s);
+}
+Check(stuckApart.Output is { OpenL: 1f, OpenR: 1f }, "stuck lids are still rescued with symmetry off");
+
 var cappedWink = new EyeProcessor(new EyeSettings { Calibration = "fixed", Eyelids = "linked" });
 var capStart = 0f;
 for (var i = 0; i < 720; i++)

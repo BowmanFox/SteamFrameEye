@@ -13,6 +13,7 @@ public struct EyeSample
     public float OpenL, OpenR;             // raw eyelid openness from the eye server, 0..1
     public float CovL, CovR;               // largest gaze covariance component per eye (tracking quality)
     public bool WinksOff;                  // the wink switch in the headset's dashboard tab is off
+    public bool SymmetryOff;               // the eyelid symmetry switch in that tab is off
 }
 
 /// <summary>Processed values in VRCFaceTracking units: gaze in radians (the scale the Steam Link module
@@ -829,9 +830,11 @@ public sealed class EyeProcessor
         }
         var normL = Left.Normalized;
         var normR = Right.Normalized;
+        // With symmetry off each eye keeps its own value, except while the lids are stuck: they say nothing then.
+        var symmetric = !x.SymmetryOff;
         switch (_s.Eyelids)
         {
-            case "linked" when winkL || winkR:
+            case "linked" when (winkL || winkR) && (symmetric || Rescuing):
                 // A wink: the open eye's pupil is tracked, so it is open even when the eye server reads its lid as
                 // closed as well, which it often does during a wink. The closed eye's lid value flickers meanwhile.
                 _out.OpenL = normL = winkL ? 0f : 1f;
@@ -840,17 +843,17 @@ public sealed class EyeProcessor
             case "linked" when Rescuing:
                 _out.OpenL = _out.OpenR = normL = normR = _rescue.ShowClosed ? 0f : 1f;
                 break;
-            case "linked":
+            case "linked" when symmetric:
                 // The Frame's eye server can read one lid as closed for seconds while that pupil is still tracked;
                 // real blinks close both lids, so the more open eye is the better estimate for both.
                 _out.OpenL = _out.OpenR = MathF.Max(_out.OpenL, _out.OpenR);
                 normL = normR = MathF.Max(normL, normR);
                 break;
-            case "left":
+            case "left" when symmetric:
                 _out.OpenR = _out.OpenL;
                 normR = normL;
                 break;
-            case "right":
+            case "right" when symmetric:
                 _out.OpenL = _out.OpenR;
                 normL = normR;
                 break;

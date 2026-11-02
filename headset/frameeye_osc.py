@@ -56,11 +56,11 @@ EYE_DATA_FMT = "<IBd6f6f3f6f6f2f8f"
 EYE_DATA_LEN = struct.calcsize(EYE_DATA_FMT)   # 137 bytes
 
 # Raw packet for the PC-side VRCFT module (little-endian, 96 bytes):
-#   char[4] "SFEY", u16 version=1, u16 flags (bit0 valid, bit1 wink detection off), u32 seq, f64 sample_time,
+#   char[4] "SFEY", u16 version=1, u16 flags (bit0 valid, bit1 wink detection off, bit2 eyelid symmetry off), u32 seq, f64 sample_time,
 #   f32 gazeL[3], gazeR[3], fixation[3], f32 opennessL, opennessR, f32 covL[3], covR[3], f64 send_time
 RAW_FMT = "<4sHHId3f3f3f2f3f3fd"
 RAW_VERSION = 1
-FLAG_VALID, FLAG_WINKS_OFF = 1, 2
+FLAG_VALID, FLAG_WINKS_OFF, FLAG_SYMMETRY_OFF = 1, 2, 4
 
 SCALE = 4.0 / math.pi
 DEFAULT_POLL_MS = 4.0         # fallback polling interval when the futex wait is unavailable
@@ -178,8 +178,9 @@ def build_osc(r, prefix, values=None):
     return msgs, vals
 
 
-def build_raw(r, seq, valid, winks=True):
-    flags = (FLAG_VALID if valid else 0) | (0 if winks else FLAG_WINKS_OFF)
+def build_raw(r, seq, valid, winks=True, symmetry=True):
+    flags = ((FLAG_VALID if valid else 0) | (0 if winks else FLAG_WINKS_OFF)
+             | (0 if symmetry else FLAG_SYMMETRY_OFF))
     return struct.pack(RAW_FMT, b"SFEY", RAW_VERSION, flags, seq & 0xFFFFFFFF,
                        r["sample_time"], *r["gaze"][0], *r["gaze"][1], *r["fixation"],
                        *r["openness"], *r["cov"][0], *r["cov"][1], time.monotonic())
@@ -349,6 +350,7 @@ class SenderRuntime:
         self.enabled = True           # False: keep tracking state for display, send nothing
         self.osc_smoothing = args.osc_smoothing
         self.wink_detection = True
+        self.eye_symmetry = True
         self._osc_smoother = DirectOscSmoother()
         self._osc_mode = None
         self._lid_watch = LidWatch()
@@ -417,7 +419,7 @@ class SenderRuntime:
             return valid, (derived_values(r) if valid else None), 0
         for target in self.raw_targets:
             try:
-                self.sock.sendto(build_raw(r, seq, valid, self.wink_detection), target)
+                self.sock.sendto(build_raw(r, seq, valid, self.wink_detection, self.eye_symmetry), target)
             except OSError:
                 errors += 1
         vals = derived_values(r) if valid else None

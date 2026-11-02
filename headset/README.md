@@ -74,7 +74,8 @@ The settings card is used with the laser pointer. A click anywhere in a row acts
 - **PC address** is a text field. A click opens the SteamVR keyboard, pre-filled with the current value. Enter `host` or `host:port`; the port defaults to 9021. The field mirrors the typing and takes the value on *Done*. An unusable entry is ignored and logged.
 - **VRChat direct OSC (PC)** additionally sends the eye values as VRCFaceTracking "v2" avatar parameters straight to VRChat's OSC input on the PC, at port 9000 of the PC address. This is a way to run without VRCFaceTracking. It is not a standalone-headset mode, because VRChat does not run on the headset itself. It carries only the parameters listed below, so avatars that need VRCFaceTracking's derived or binary-encoded parameters still need VRCFaceTracking. With VRCFaceTracking running, leave it off, or both will write the same parameters.
 - **Direct OSC smoothing** defaults to on. It removes single-sample gaze and eyelid spikes, smooths small gaze movements and follows larger movements faster. During blinks or poor tracking, gaze holds; the open eye steers during a wink. The eye preview shows the smoothed values when direct OSC is active. Turning this off restores the original raw direct OSC values. This switch does not affect the raw feed to VRCFaceTracking.
-- **Wink detection** defaults to on. It is for the VRCFaceTracking module with `"eyelids": "linked"` and applies immediately: on, one eye can close on its own when a wink is recognised; off, both eyes always match. The switch travels with the eye data, so it needs this app and the module from the same version or newer.
+- **Eyelid symmetry** defaults to on. It is for the VRCFaceTracking module with `"eyelids": "linked"` and applies immediately: on, both eyelids match; off, each eyelid follows its own reading, so a misread lid shows. Gaze is not affected.
+- **Wink detection** defaults to on. It is for the VRCFaceTracking module with `"eyelids": "linked"` and applies immediately: on, one eye can close on its own when a wink is recognised; off, no winks are recognised. Both switches travel with the eye data, so they need this app and the module from the same version or newer.
 
 Direct OSC sends `/avatar/parameters/FT/EyeTrackingActive` (true) and, under `/avatar/parameters/FT/v2/`, `EyeLeftX`, `EyeLeftY`, `EyeRightX`, `EyeRightY`, `EyeX`, `EyeY`, `EyeLidLeft` and `EyeLidRight`. Gaze values are atan2(x, -z) · 4/π clamped to ±1, so ±45° maps to ±1. The prefix `/FT` can be changed with `--prefix`.
 
@@ -89,11 +90,12 @@ All settings are written to `~/frameeye/frameeye.conf.json` immediately and surv
   "enabled": true,
   "osc_smoothing": true,
   "wink_detection": true,
+  "eye_symmetry": true,
   "mouse_origin_bottom": true
 }
 ```
 
-`raw` lists the PCs that get `SFEY` packets, `target` is the VRChat OSC address or `null`, `enabled` is the sending switch, and `osc_smoothing` is the direct OSC filter switch (defaults to `true` for older configurations). `wink_detection` is the wink switch (also defaults to `true`). `mouse_origin_bottom` is optional and defaults to `true`, because OpenVR reports laser-pointer coordinates with the origin at the bottom left. Add it with `false` if hovering highlights the wrong row, then restart the app.
+`raw` lists the PCs that get `SFEY` packets, `target` is the VRChat OSC address or `null`, `enabled` is the sending switch, and `osc_smoothing` is the direct OSC filter switch (defaults to `true` for older configurations). `wink_detection` and `eye_symmetry` are the wink and symmetry switches (both also default to `true`). `mouse_origin_bottom` is optional and defaults to `true`, because OpenVR reports laser-pointer coordinates with the origin at the bottom left. Add it with `false` if hovering highlights the wrong row, then restart the app.
 
 ## Command line
 
@@ -123,7 +125,7 @@ python3 frameeye_osc.py --raw <pc-ip>:9021 [--target <pc-ip>:9000] [--verbose]
 |---|---|---|
 | 0 | char[4] | `SFEY` |
 | 4 | u16 | version = 1 |
-| 6 | u16 | flags, bit 0 = sample valid, bit 1 = wink detection off |
+| 6 | u16 | flags, bit 0 = sample valid, bit 1 = wink detection off, bit 2 = eyelid symmetry off |
 | 8 | u32 | sequence |
 | 12 | f64 | sample_time (headset clock) |
 | 20 | f32[3] | gaze direction left (x right, y up, -z forward) |
@@ -140,7 +142,7 @@ python3 frameeye_osc.py --raw <pc-ip>:9021 [--target <pc-ip>:9000] [--verbose]
 - **Do not use `--no-gl`.** The panel is normally streamed into one persistent OpenGL ES texture (`gl_texture.py`, EGL surfaceless on Mesa zink) and handed to SteamVR with `SetOverlayTexture`. With `--no-gl`, or if the GL setup fails, the app falls back to `SetOverlayRaw`. On the Steam Frame with SteamVR 2.17.10, vrcompositor has been observed to crash with SIGBUS shortly after a client that used `SetOverlayRaw` exits, and gamescope can then restart in a loop. If the footer shows `raw` instead of `GL`, check the log for `GL texture path unavailable`.
 - **Empty dashboard tab, log says `SteamVR could not share the panel texture`.** SteamVR could not create the image the panel is shown with. On the Steam Frame this happened once the compositor had run out of shared-resource slots (`Ran out of IPC SharedObjectManager entries` in the system journal), used up by another overlay that reloads its image from a file. SteamVR's client library crashes on its next call after that error, so the app stops talking to SteamVR: eye data keeps flowing, the tab stays empty, and the app reconnects by itself after SteamVR has been restarted.
 - The eye-server layout is not a public interface. If a SteamOS update changes it in a way the size-based guess does not cover, the tab shows "eye server version not supported" or "layout not recognised" and nothing is sent. The app reopens the object by itself when the eye server re-creates it, for example after an update.
-- After the headset goes back on, the eye server's eyelid values can stick near 0 on open eyes for minutes, and moving the headset tends to clear it. This comes from Valve's tracker; gaze keeps working. The tab then shows `eyelids  not read: adjust the headset` until they read open again. With `"eyelids": "linked"`, the VRCFaceTracking module works around it (see the main README); direct OSC does not.
+- After the headset goes back on, the eye server's eyelid values can stick near 0 on open eyes for minutes, and moving the headset tends to clear it. This comes from Valve's tracker; gaze keeps working. The tab then shows `eyelids  not read: adjust headset` until they read open again. With `"eyelids": "linked"`, the VRCFaceTracking module works around it (see the main README); direct OSC does not.
 - SteamOS 0.4.3 added *Track Dominant Eye Only* (VR Settings > General, advanced settings). What the eye server reports for the untracked eye in that mode has not been checked yet; if eye data stops while it is on, turn it off and record a sample with `tools/record_eyes.py`.
 
 ## Files

@@ -222,9 +222,38 @@ class OscSmoothing(unittest.TestCase):
                 finally:
                     app.runtime.sock.close()
         self.assertLessEqual(overlay.ROW_WINKS[3], overlay.SETTINGS_CARD[3])
+        self.assertLessEqual(overlay.ROW_SYMMETRY[2], overlay.ROW_WINKS[0])
         self.assertEqual(struct.unpack_from("<H", sender.build_raw(record(1), 1, True), 6)[0], 1)
         self.assertEqual(struct.unpack_from("<H", sender.build_raw(record(1), 1, True, False), 6)[0], 3)
         self.assertEqual(struct.unpack_from("<H", sender.build_raw(record(1), 1, False, False), 6)[0], 2)
+
+    def test_symmetry_switch_is_persisted_drawn_and_sent(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = str(Path(temp) / "frameeye.conf.json")
+            with patch.object(overlay, "CONFIG", path):
+                Path(path).write_text(json.dumps({"raw": ["127.0.0.1:9021"], "target": None, "wink_detection": False}))
+                args = sender.build_parser().parse_args([])
+                app = overlay.OverlayApp(args)
+                try:
+                    self.assertTrue(app.runtime.eye_symmetry, "older configurations keep symmetry on")
+                    x0, y0, _, _ = overlay.ROW_SYMMETRY
+                    self.assertEqual(overlay.control_at(x0 + 5, y0 + 5), "symmetry")
+                    overlay.draw_panel(app.panel, app.runtime.snapshot(), app.settings, None, None, "2", "GL")
+                    on = bytes(app.panel.buf)
+                    app.handle_click(x0 + 5, y0 + 5)
+                    overlay.draw_panel(app.panel, app.runtime.snapshot(), app.settings, None, None, "2", "GL")
+                    self.assertNotEqual(on, bytes(app.panel.buf))
+                    self.assertFalse(app.runtime.eye_symmetry)
+                    self.assertFalse(app.runtime.wink_detection, "the two switches are separate")
+                    saved = overlay.Settings(args)
+                    self.assertFalse(saved.eye_symmetry)
+                    self.assertFalse(saved.wink_detection)
+                finally:
+                    app.runtime.sock.close()
+        flags = lambda *a: struct.unpack_from("<H", sender.build_raw(record(1), 1, True, *a), 6)[0]
+        self.assertEqual(flags(True, False), 5)
+        self.assertEqual(flags(False, False), 7)
+        self.assertEqual(flags(True, True), 1)
 
     def test_actual_udp_is_smoothed_but_sfey_stays_raw(self):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as raw, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as osc:

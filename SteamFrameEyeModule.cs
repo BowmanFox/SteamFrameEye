@@ -45,7 +45,7 @@ public class SteamFrameEyeModule : ExtTrackingModule
     private bool _have;
     private DateTime _lastRx = DateTime.MinValue;
     private long _rxCount, _badCount;
-    private bool _loggedFirst, _loggedStale, _winksOff;
+    private bool _loggedFirst, _loggedStale, _winksOff, _symmetryOff;
     private DateTime _nextSave, _nextCalibrationLog;
 
     public override (bool SupportsEye, bool SupportsExpression) Supported => (true, false);
@@ -202,6 +202,11 @@ public class SteamFrameEyeModule : ExtTrackingModule
                 _winksOff = s.WinksOff;
                 Logger.LogInformation("SteamFrameEye: wink detection switched {State} on the headset", _winksOff ? "off" : "on");
             }
+            if (s.SymmetryOff != _symmetryOff)
+            {
+                _symmetryOff = s.SymmetryOff;
+                Logger.LogInformation("SteamFrameEye: eyelid symmetry switched {State} on the headset", _symmetryOff ? "off" : "on");
+            }
             var o = processor.Process(s);
             lock (_lock)
             {
@@ -270,7 +275,8 @@ public class SteamFrameEyeModule : ExtTrackingModule
     }
 
     /// <summary>
-    /// Packet (little-endian, 96 bytes): "SFEY", u16 version, u16 flags (bit0 = valid, bit1 = wink detection off), u32 seq,
+    /// Packet (little-endian, 96 bytes): "SFEY", u16 version, u16 flags (bit0 = valid, bit1 = wink detection off,
+    /// bit2 = eyelid symmetry off), u32 seq,
     /// f64 sample_time, f32 gazeL[3], gazeR[3], fixation[3], openness L, openness R,
     /// f32 covL[3], covR[3], f64 send_time.
     /// </summary>
@@ -287,6 +293,7 @@ public class SteamFrameEyeModule : ExtTrackingModule
         }
         var flags = BinaryPrimitives.ReadUInt16LittleEndian(b.Slice(6));
         s.WinksOff = (flags & 2) != 0;
+        s.SymmetryOff = (flags & 4) != 0;
         s.SampleTime = BinaryPrimitives.ReadDoubleLittleEndian(b.Slice(12));
         s.LX = ReadF(b, 0); s.LY = ReadF(b, 1); s.LZ = ReadF(b, 2);
         s.RX = ReadF(b, 3); s.RY = ReadF(b, 4); s.RZ = ReadF(b, 5);

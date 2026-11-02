@@ -189,12 +189,14 @@ ROW_SENDING = (32, 376, 608, 428)      # whole row is clickable
 ROW_ADDRESS = (32, 436, 608, 480)
 ROW_VRCHAT = (32, 488, 608, 540)
 ROW_SMOOTHING = (32, 548, 608, 600)
-ROW_WINKS = (32, 608, 608, 660)
+ROW_SYMMETRY = (32, 608, 312, 660)     # these two share a row
+ROW_WINKS = (328, 608, 608, 660)
 TOGGLE_X0, TOGGLE_X1 = 496, 608
+SMALL_TOGGLE_W = 76
 FIELD_X0, FIELD_X1 = 200, 608
 CAPTION_CHARS = (TOGGLE_X0 - 8 - 32) // CELL_W
 CONTROLS = (("sending", ROW_SENDING), ("address", ROW_ADDRESS), ("vrchat", ROW_VRCHAT),
-            ("smoothing", ROW_SMOOTHING), ("winks", ROW_WINKS))
+            ("smoothing", ROW_SMOOTHING), ("symmetry", ROW_SYMMETRY), ("winks", ROW_WINKS))
 
 
 def control_at(x, y):
@@ -269,7 +271,7 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
         rows.append(("left", "gaze %+.2f %+.2f  lid %.2f" % (lx, ly, lid_l)))
         rows.append(("right", "gaze %+.2f %+.2f  lid %.2f" % (rx, ry, lid_r)))
     if snapshot.get("lids_stuck"):
-        rows.append(("eyelids", "not read: adjust the headset"))
+        rows.append(("eyelids", "not read: adjust headset"))
     y = 130
     for label, value in rows:
         panel.text(32, y, label.rjust(8), DIM)
@@ -318,10 +320,15 @@ def draw_panel(panel, snapshot, settings, hot, editing_text, vr_version, texture
     panel.text(32, y0 + 27, "Steadier gaze and eyelids" if settings.target else "Used when direct OSC is on", DIM)
     draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, settings.osc_smoothing, hot == "smoothing")
 
+    x0, y0, x1, y1 = ROW_SYMMETRY
+    panel.text(x0, y0 + 4, "Eyelid symmetry", TEXT)
+    panel.text(x0, y0 + 27, "Both lids match" if settings.eye_symmetry else "Each lid alone", DIM)
+    draw_toggle(panel, x1 - SMALL_TOGGLE_W, y0 + 4, x1, y1 - 4, settings.eye_symmetry, hot == "symmetry")
+
     x0, y0, x1, y1 = ROW_WINKS
-    panel.text(32, y0 + 4, "Wink detection", TEXT)
-    panel.text(32, y0 + 27, "One eye can close alone" if settings.wink_detection else "Both eyes always match", DIM)
-    draw_toggle(panel, TOGGLE_X0, y0 + 4, TOGGLE_X1, y1 - 4, settings.wink_detection, hot == "winks")
+    panel.text(x0, y0 + 4, "Wink detection", TEXT)
+    panel.text(x0, y0 + 27, "One can close" if settings.wink_detection else "No winks", DIM)
+    draw_toggle(panel, x1 - SMALL_TOGGLE_W, y0 + 4, x1, y1 - 4, settings.wink_detection, hot == "winks")
 
 
 # ----------------------------------------------------------------------------- settings
@@ -335,6 +342,7 @@ class Settings:
         self.enabled = True
         self.osc_smoothing = args.osc_smoothing
         self.wink_detection = True
+        self.eye_symmetry = True
         self.mouse_origin_bottom = True   # OpenVR mouse events are in GL space (0,0 = bottom left)
         cfg = load_config()
         if isinstance(cfg.get("raw"), list):
@@ -347,13 +355,16 @@ class Settings:
             self.osc_smoothing = cfg["osc_smoothing"]
         if isinstance(cfg.get("wink_detection"), bool):
             self.wink_detection = cfg["wink_detection"]
+        if isinstance(cfg.get("eye_symmetry"), bool):
+            self.eye_symmetry = cfg["eye_symmetry"]
         if "mouse_origin_bottom" in cfg:
             self.mouse_origin_bottom = bool(cfg["mouse_origin_bottom"])
 
     def save(self):
         cfg = load_config()
         cfg.update({"raw": self.raw, "target": self.target, "enabled": self.enabled,
-                    "osc_smoothing": self.osc_smoothing, "wink_detection": self.wink_detection})
+                    "osc_smoothing": self.osc_smoothing, "wink_detection": self.wink_detection,
+                    "eye_symmetry": self.eye_symmetry})
         save_config(cfg)
 
     def apply(self, runtime):
@@ -361,6 +372,7 @@ class Settings:
         runtime.enabled = self.enabled
         runtime.osc_smoothing = self.osc_smoothing
         runtime.wink_detection = self.wink_detection
+        runtime.eye_symmetry = self.eye_symmetry
 
     def pc_host(self):
         return self.raw[0].rsplit(":", 1)[0] if self.raw else None
@@ -580,6 +592,12 @@ class OverlayApp:
         self.settings.save()
         log.info("wink detection %s", "on" if self.settings.wink_detection else "off")
 
+    def toggle_symmetry(self):
+        self.settings.eye_symmetry = not self.settings.eye_symmetry
+        self.runtime.eye_symmetry = self.settings.eye_symmetry
+        self.settings.save()
+        log.info("eyelid symmetry %s", "on" if self.settings.eye_symmetry else "off")
+
     def edit_address(self):
         existing = self.settings.raw[0] if self.settings.raw else ""
         try:
@@ -647,6 +665,8 @@ class OverlayApp:
             self.toggle_smoothing()
         elif cid == "winks":
             self.toggle_winks()
+        elif cid == "symmetry":
+            self.toggle_symmetry()
         self.dirty = True
 
     def handle_events(self):
