@@ -6,3 +6,8 @@ __pycache__/
 headset/frameeye.conf.json
 headset/frameeye.vrmanifest
 .vs/
+# FrameFace: C helpers built in a checkout, probe bundles copied to the PC, CI parity vectors
+headset/frameface/lib/
+*.so
+frameface-probe-*/
+/parity/

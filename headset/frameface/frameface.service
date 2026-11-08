@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=FrameFace: VIVE Facial Tracker camera service for Baballonia (MJPEG on TCP 9023)
+After=default.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -I %h/frameface/frameface_main.py run
+Restart=always
+RestartSec=3
+TimeoutStopSec=8
+KillMode=mixed
+NoNewPrivileges=yes
+UMask=0077
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+[Install]
+WantedBy=default.target

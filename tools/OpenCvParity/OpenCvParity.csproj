@@ -1,0 +1,17 @@
+<!-- SPDX-License-Identifier: MIT -->
+<!-- CI-only (job opencv-parity, continue-on-error): it restores OpenCvSharp from NuGet, so it is never
+     built on the developer PC. Usage and exit codes: see Program.cs (spec Appendix G). -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- The OpenCvSharp version Baballonia ships (research section c.1). -->
+    <PackageReference Include="OpenCvSharp4" Version="4.13.0.20260308" />
+    <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.13.0.20260308" />
+  </ItemGroup>
+</Project>

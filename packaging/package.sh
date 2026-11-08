@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# Package the built module the way VRCFaceTracking expects it:
+# SPDX-License-Identifier: MIT
+# Package the built module the way VRCFaceTracking expects it, and both headset apps:
 #   SteamFrameEyeModule-<version>.zip  = module.json + SteamFrameEyeModule.dll (+ README, LICENSE)
-#   FrameEye-Bridge-<version>.tar.gz = headset side: FrameEye Bridge, the SteamVR dashboard app (sender, installer, unit)
+#   FrameEye-Bridge-<version>.tar.gz = headset side for the eyes: FrameEye Bridge, the SteamVR dashboard app
+#                                      (sender, installer, unit), files of headset/release-files.txt
+#   FrameFace-<version>.tar.gz       = headset side for a VIVE Facial Tracker: the FrameFace service (installer,
+#                                      unit, probe), files of headset/frameface/release-files.txt
+#   module.json                      = the manifest inside the zip, for reference / manual installs
 #
 # VRCFT installs such a zip through "install local module" (InstallLocalModule: extracts, requires
 # module.json, moves the folder to %APPDATA%\VRCFaceTracking\CustomLibs\<ModuleId>\ and loads
-# DllFileName from it). Unzipping it there by hand gives the same result.
+# DllFileName from it). Unzipping it there by hand (with VRCFaceTracking closed) gives the same result.
 #
 # usage: packaging/package.sh <version> <download-url-base> <page-url> [dll-path] [out-dir]
 set -euo pipefail
@@ -19,9 +24,14 @@ ROOT="$(cd "$HERE/.." && pwd)"
 MODULE_ID="$(tr -d '[:space:]' < "$HERE/module-id.txt")"
 ZIP="SteamFrameEyeModule-${VERSION}.zip"
 TGZ="FrameEye-Bridge-${VERSION}.tar.gz"
+FFTGZ="FrameFace-${VERSION}.tar.gz"
 
 [ -f "$ROOT/$DLL" ] || { echo "module dll not found: $ROOT/$DLL (run dotnet build -c Release first)" >&2; exit 1; }
+while IFS= read -r f; do
+  [ -z "$f" ] || [ -f "$ROOT/headset/frameface/$f" ] || { echo "FrameFace release file not found: $f" >&2; exit 1; }
+done < "$ROOT/headset/frameface/release-files.txt"
 mkdir -p "$OUT"
+OUT="$(cd "$OUT" && pwd)"
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 
@@ -36,7 +46,7 @@ cp "$ROOT/README.md" "$STAGE/README.md"
 [ -f "$ROOT/LICENSE" ] && cp "$ROOT/LICENSE" "$STAGE/LICENSE"
 
 if command -v zip >/dev/null 2>&1; then
-  (cd "$STAGE" && zip -q -9 "$OLDPWD/$OUT/$ZIP" module.json SteamFrameEyeModule.dll README.md $( [ -f LICENSE ] && echo LICENSE ))
+  (cd "$STAGE" && zip -q -9 "$OUT/$ZIP" module.json SteamFrameEyeModule.dll README.md $( [ -f LICENSE ] && echo LICENSE ))
 else
   python3 - "$STAGE" "$OUT/$ZIP" <<'PY'
 import os, sys, zipfile
@@ -48,6 +58,7 @@ PY
 fi
 
 tar czf "$OUT/$TGZ" -C "$ROOT/headset" -T "$ROOT/headset/release-files.txt"
+tar czf "$OUT/$FFTGZ" -C "$ROOT/headset/frameface" -T "$ROOT/headset/frameface/release-files.txt"
 cp "$STAGE/module.json" "$OUT/module.json"
 echo "packaged:"; ls -la "$OUT"
 echo "module.json:"; cat "$OUT/module.json"

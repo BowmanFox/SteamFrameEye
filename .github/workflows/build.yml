@@ -1,13 +1,26 @@
-# GitHub Actions: build the VRCFaceTracking module and package the headset app.
+# GitHub Actions: build the VRCFaceTracking module and package the module and both headset apps
+# (FrameEye Bridge for the eyes, FrameFace for a VIVE Facial Tracker).
 #
 # Every push and pull request: build the module against the VRCFT 5.4.5 assemblies stored in
 # lib/vrcft-5.4.5 (compile-time only, so no VRCFaceTracking install is needed), check that the headset
-# and training Python files compile, and package both parts. The packages are kept as workflow artifacts.
+# and training Python files compile and the shell scripts parse, run the Python checks (packaging, the SSH
+# installers, FrameFace) and the C# checks (smoothing, the module's face path, the module itself against
+# VRCFaceTracking stand-ins), and package everything. The packages are kept as workflow artifacts.
 #
 # Pushing a tag vX.Y.Z also publishes a GitHub release with
 #   SteamFrameEyeModule-X.Y.Z.zip     (module.json + DLL, VRCFaceTracking "install local module" format)
-#   FrameEye-Bridge-X.Y.Z.tar.gz      (FrameEye Bridge, the headset app)
+#   FrameEye-Bridge-X.Y.Z.tar.gz      (FrameEye Bridge, the headset app for the eyes)
+#   FrameFace-X.Y.Z.tar.gz            (FrameFace, the headset service for a VIVE Facial Tracker)
 #   module.json                       (for reference / manual installs)
+#
+# Jobs: windows (Windows PowerShell 5.1 and PowerShell 7 packaging, Python 3.x and the 3.10 floor),
+# build (ubuntu: module, tests with gcc and TurboJPEG, release), headset-arm64 (FrameFace on arm64 with
+# glibc + TurboJPEG 2 and with Alpine musl + TurboJPEG 3; the release does not wait for it) and
+# opencv-parity (optional pixel parity with OpenCvSharp).
+#
+# Hosted runners are slower and noisier than the PC the FrameFace timing thresholds were measured on
+# (for example test_ff_preprocess's SWAR <= 8 ms per frame), so every test step sets
+# FRAMEFACE_NO_FPS_ASSERT=1: frame rates and timings are still printed, but not asserted.
 #
 # The Forgejo mirror builds its own releases with .forgejo/workflows/release.yml; Forgejo ignores this
 # directory because that one exists.
@@ -27,6 +40,11 @@ jobs:
     strategy:
       matrix:
         powershell: [powershell, pwsh]
+        python: ['3.x']
+        include:
+          # The oldest supported Python (FrameFace and the tests run on 3.10 to 3.14).
+          - powershell: pwsh
+            python: '3.10'
     permissions:
       contents: read
     env:
@@ -43,20 +61,41 @@ jobs:
       - name: Setup Python for script integration checks
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: ${{ matrix.python }}
       - name: Build and package using native Windows tools
         shell: pwsh
         run: |
           & $env:FRAMEEYE_POWERSHELL -NoProfile -ExecutionPolicy Bypass -File ./build.ps1 -VrcftDir ./lib/vrcft-5.4.5
           exit $LASTEXITCODE
-      - name: Verify packaging and SSH installer behavior
+      - name: Verify packaging, the SSH installers and FrameFace (Linux-only tests skip)
+        # Hosted runner: print frame rates and timings, do not assert them.
+        env:
+          FRAMEFACE_NO_FPS_ASSERT: "1"
         run: python -m unittest discover -s tools/tests -v
       - name: Check gaze smoothing behavior
         run: dotnet run --project tools/SmoothingChecks -c Release
+      - name: Check the module's face path (OSC, mapping, gate, settings, claims)
+        run: dotnet run --project tools/FaceChecks -c Release
+      - name: Check the module itself (SteamFrameEyeModule.cs against VRCFaceTracking stand-ins)
+        # On CI the eye rows run too: they bind UDP on 0.0.0.0, which local runs leave out.
+        env:
+          MODULECHECKS_ALLOW_WILDCARD: "1"
+        run: dotnet run --project tools/ModuleChecks/ModuleChecks.csproj -c Release -p:VrcftDir=${{ github.workspace }}/lib/vrcft-5.4.5
+      - name: Module harness against the vendored VRCFaceTracking 5.4.5 (optional, exit 77 = skipped)
+        # Always ends in SKIP (77) without the VRCFT core's dependencies, which lib/vrcft-5.4.5 does not include
+        # (VRCFaceTracking.Core needs CommunityToolkit.Mvvm and more); tools/ModuleChecks runs the module instead.
+        # It uses an empty temporary config folder and two fixed ports outside 8888, 8889, 9000, 9001, 9015, 9020
+        # and 9021.
+        continue-on-error: true
+        env:
+          SFEYE_CONFIG_DIR: ${{ runner.temp }}/sfeye-harness-config
+          SFEYE_PORT: "47021"
+          SFFACE_PORT: "47888"
+        run: dotnet run --project tools/ModuleHarness -c Release
       - name: Keep the Windows packages
         uses: actions/upload-artifact@v4
         with:
-          name: FrameEye-Bridge-windows-${{ matrix.powershell }}
+          name: FrameEye-Bridge-windows-${{ matrix.powershell }}-python${{ matrix.python }}
           path: dist/
 
   build:
@@ -96,17 +135,33 @@ jobs:
             -p:Version="${{ steps.ver.outputs.version }}"
           ls -la bin/Release/net10.0/
 
-      - name: Check the Python files compile
+      - name: Install gcc and TurboJPEG (FrameFace C helper and JPEG tests, tj2 path)
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc libturbojpeg0-dev
+
+      - name: Check the Python files compile and the shell scripts parse
         run: |
           dirs="headset"
           [ -d training ] && dirs="$dirs training"
           python3 -m py_compile $(find $dirs -name '*.py' -not -path '*/__pycache__/*')
-          bash -n headset/install-overlay.sh headset/frameeye_overlay.sh
+          # One bash -n per script: bash -n checks only its first file and passes the others to it as $1, $2, ...
+          for f in headset/install-overlay.sh headset/frameeye_overlay.sh headset/frameface/install.sh tools/docker/arm64-checks.sh; do
+            bash -n "$f"
+          done
 
-      - name: Check smoothing and sender behavior
+      - name: Check smoothing, sender, FrameFace and face-path behavior
+        # Hosted runner: print frame rates and timings, do not assert them.
+        env:
+          FRAMEFACE_NO_FPS_ASSERT: "1"
         run: |
           python3 -m unittest discover -s tools/tests -v
           dotnet run --project tools/SmoothingChecks -c Release
+          dotnet run --project tools/FaceChecks -c Release
+
+      - name: Check the module itself (SteamFrameEyeModule.cs against VRCFaceTracking stand-ins)
+        # On CI the eye rows run too: they bind UDP on 0.0.0.0, which local runs leave out.
+        env:
+          MODULECHECKS_ALLOW_WILDCARD: "1"
+        run: dotnet run --project tools/ModuleChecks/ModuleChecks.csproj -c Release -p:VrcftDir=${{ github.workspace }}/lib/vrcft-5.4.5
 
       - name: Package release archives
         run: |
@@ -128,18 +183,77 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
-          name: FrameEye Bridge ${{ steps.ver.outputs.version }}
+          name: SteamFrameEye ${{ steps.ver.outputs.version }} (module, FrameEye Bridge, FrameFace)
           body: |
-            Steam Frame eye tracking for VRCFaceTracking: per-eye gaze and eyelid openness.
+            Steam Frame eye and face tracking for VRCFaceTracking 5.4.x and 6.0: per-eye gaze and eyelid
+            openness from the Frame's eye tracking (FrameEye Bridge), plus mouth and face expressions from a
+            VIVE Facial Tracker plugged into the Frame (FrameFace, with Baballonia on the PC).
 
-            **PC:** in VRCFaceTracking use "install local module" with
-            `SteamFrameEyeModule-${{ steps.ver.outputs.version }}.zip`, or unzip it into
-            `%APPDATA%\VRCFaceTracking\CustomLibs\58be7fa6-4102-44ab-adba-25021d3af8b7\`.
-            The module listens on UDP 9021 and needs VRCFaceTracking 5.4.x.
+            **PC:** exit VRCFaceTracking first (tray icon -> Exit), then unzip
+            `SteamFrameEyeModule-${{ steps.ver.outputs.version }}.zip` into
+            `%APPDATA%\VRCFaceTracking\CustomLibs\58be7fa6-4102-44ab-adba-25021d3af8b7\` and start it again.
+            In-app "Install local module" also works, but may need a second run when it replaces a loaded
+            older version. The module listens on UDP 9021 (eyes) and on 127.0.0.1:8888 for Baballonia's OSC
+            (face). Do not install VRCFT-Babble with this module.
 
-            **Headset:** unpack `FrameEye-Bridge-${{ steps.ver.outputs.version }}.tar.gz` into
+            **Headset, eyes:** unpack `FrameEye-Bridge-${{ steps.ver.outputs.version }}.tar.gz` into
             `~/FrameEye-Bridge` on the Steam Frame and run `bash ~/FrameEye-Bridge/install-overlay.sh <pc-ip>:9021`.
+
+            **Headset, face (FrameFace):** unpack `FrameFace-${{ steps.ver.outputs.version }}.tar.gz` into a new
+            folder such as `~/frameface-upload-manual` (never into `~/frameface`) and run
+            `bash ~/frameface-upload-manual/install.sh` from there; or run `headset/frameface/install-frameface.ps1`
+            on the PC. Then install Baballonia on the PC (it is not bundled) and set its Face Camera Address to
+            the printed URL as Wireless/IP Camera.
           files: |
             dist/SteamFrameEyeModule-${{ steps.ver.outputs.version }}.zip
             dist/FrameEye-Bridge-${{ steps.ver.outputs.version }}.tar.gz
+            dist/FrameFace-${{ steps.ver.outputs.version }}.tar.gz
             dist/module.json
+
+  headset-arm64:
+    # FrameFace on arm64 like the Steam Frame: natively with glibc and TurboJPEG 2 (tj2), then in Alpine with
+    # musl and TurboJPEG 3 (tj3). Every test_ff_* file runs with FRAMEFACE_REQUIRE_NATIVE=1, so a Linux-only
+    # test fails instead of skipping. The release does not depend on this job.
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    env:
+      # Hosted runner: print frame rates and timings, do not assert them.
+      FRAMEFACE_NO_FPS_ASSERT: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install gcc and TurboJPEG
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends gcc libturbojpeg0-dev
+      - name: FrameFace checks on arm64 (glibc, tj2)
+        run: sh tools/docker/arm64-checks.sh "$PWD"
+      - name: FrameFace checks on Alpine arm64 (musl, tj3)
+        run: |
+          docker run --rm -e FRAMEFACE_NO_FPS_ASSERT=1 -v "$PWD:/src:ro" alpine:3.20 \
+            sh -c "apk add --no-cache python3 gcc musl-dev linux-headers libjpeg-turbo-dev bash && sh /src/tools/docker/arm64-checks.sh /src"
+
+  opencv-parity:
+    # Optional: compares FrameFace's Baballonia-exact pixels with OpenCvSharp (the library Baballonia uses).
+    # A difference is a finding to act on, never a reason to block a build.
+    runs-on: windows-latest
+    continue-on-error: true
+    permissions:
+      contents: read
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Write the oracle vectors
+        run: python tools/parity/gen_vectors.py --out parity
+      - name: Compare with OpenCvSharp
+        run: dotnet run --project tools/OpenCvParity -c Release -- parity

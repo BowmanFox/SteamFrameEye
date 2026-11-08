@@ -2,7 +2,8 @@
 #
 # Tag-driven: pushing vX.Y.Z builds the module at that version and publishes
 #   SteamFrameEyeModule-X.Y.Z.zip     (module.json + DLL, VRCFT "install local module" format)
-#   FrameEye-Bridge-X.Y.Z.tar.gz       (FrameEye Bridge, the headset app)
+#   FrameEye-Bridge-X.Y.Z.tar.gz       (FrameEye Bridge, the headset app for the eyes)
+#   FrameFace-X.Y.Z.tar.gz             (FrameFace, the headset service for a VIVE Facial Tracker)
 #   module.json                        (for reference / manual installs)
 # A manual dispatch without a tag only builds and packages (CI check), no release.
 #
@@ -98,21 +99,32 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
-          name: SteamFrameEyeModule ${{ steps.tag.outputs.version }}
+          name: SteamFrameEye ${{ steps.tag.outputs.version }}
           prerelease: ${{ fromJSON(github.event.inputs.prerelease || 'false') }}
           body: |
             VRCFaceTracking module for the Steam Frame's built-in eye tracking
-            (per-eye gaze + eyelid openness). Requires VRCFaceTracking 5.4.x.
+            (per-eye gaze + eyelid openness), plus mouth and face expressions from a VIVE Facial
+            Tracker on the Frame (FrameFace on the headset, Baballonia on the PC).
+            Works with VRCFaceTracking 5.4.x and 6.0.
 
-            **Install (PC):** in VRCFT use "install local module" with
-            `SteamFrameEyeModule-${{ steps.tag.outputs.version }}.zip`, or unzip it into
-            `%APPDATA%\VRCFaceTracking\CustomLibs\58be7fa6-4102-44ab-adba-25021d3af8b7\`.
-            The module listens on UDP 9021.
+            **Install (PC):** exit VRCFaceTracking first (tray icon -> Exit), then unzip
+            `SteamFrameEyeModule-${{ steps.tag.outputs.version }}.zip` into
+            `%APPDATA%\VRCFaceTracking\CustomLibs\58be7fa6-4102-44ab-adba-25021d3af8b7\`
+            and start it again. In VRCFT, "install local module" also works, but may need a second
+            run when it replaces a loaded older version. The module listens on UDP 9021 (eyes) and
+            on 127.0.0.1:8888 for Baballonia's OSC (face). Do not install VRCFT-Babble with this module.
 
             **Headset:** FrameEye Bridge, a SteamVR dashboard app. Unpack
             `FrameEye-Bridge-${{ steps.tag.outputs.version }}.tar.gz` into `~/FrameEye-Bridge` on the
             headset and run `bash ~/FrameEye-Bridge/install-overlay.sh <pc-ip>:9021` there.
+
+            **Headset, face (FrameFace):** unpack `FrameFace-${{ steps.tag.outputs.version }}.tar.gz`
+            into a new folder such as `~/frameface-upload-manual` (never into `~/frameface`) and run
+            `bash ~/frameface-upload-manual/install.sh` from there; or run
+            `headset/frameface/install-frameface.ps1` on the PC. Then install Baballonia on the PC (it
+            is not bundled) and set its Face Camera Address to the printed URL as Wireless/IP Camera.
           files: |
             dist/SteamFrameEyeModule-${{ steps.tag.outputs.version }}.zip
             dist/FrameEye-Bridge-${{ steps.tag.outputs.version }}.tar.gz
+            dist/FrameFace-${{ steps.tag.outputs.version }}.tar.gz
             dist/module.json

@@ -1,0 +1,27 @@
+<!-- SPDX-License-Identifier: MIT -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The VRCFaceTracking stand-ins of tools/ModuleChecks (VrcftStandIns.cs) as their own assembly, named and versioned
+       like the SDK that VRCFaceTracking 6.0 loads: VRCFaceTracking.SDK 6.0.0.0. ExtTrackingModule then comes from
+       another assembly than the module's code, as in the host, so the checks see which assembly the module asks for the
+       host's version (spec §8.1). BCL only plus the vendored Microsoft.Extensions.Logging.Abstractions for ILogger. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>VRCFaceTracking.SDK</AssemblyName>
+    <RootNamespace>VRCFaceTracking</RootNamespace>
+    <AssemblyVersion>6.0.0.0</AssemblyVersion>
+    <!-- The reference folder CI passes to ModuleChecks (-p:VrcftDir=...) reaches this project too; without it the vendored copy. -->
+    <VrcftDir Condition="'$(VrcftDir)' == ''">$(MSBuildThisFileDirectory)..\..\..\lib\vrcft-5.4.5</VrcftDir>
+  </PropertyGroup>
+
+  <!-- ILogger only; ModuleChecks copies the DLL next to the checks. -->
+  <ItemGroup>
+    <Reference Include="Microsoft.Extensions.Logging.Abstractions">
+      <HintPath>$(VrcftDir)\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

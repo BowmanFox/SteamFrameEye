@@ -1,0 +1,45 @@
+<!-- SPDX-License-Identifier: MIT -->
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Optional end-to-end check of the module (spec §11.2, §11.3): compiles the module sources against the
+       vendored VRCFaceTracking 5.4.5 references in lib/vrcft-5.4.5 (never a local VRCFT install), drives
+       Initialize/Update/Teardown in-process and reads UnifiedTracking.Data. It creates no VRCFT network service.
+       Without SFEYE_CONFIG_DIR, SFEYE_PORT and SFFACE_PORT it exits 77 (skip) before loading any VRCFT code. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ModuleHarness</RootNamespace>
+    <HarnessVrcftDir>$(MSBuildThisFileDirectory)..\..\lib\vrcft-5.4.5</HarnessVrcftDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\SteamFrameEyeModule.cs" Link="Module\SteamFrameEyeModule.cs" />
+    <Compile Include="..\..\EyeProcessing.cs" Link="Module\EyeProcessing.cs" />
+    <Compile Include="..\..\TestPorts.cs" Link="Module\TestPorts.cs" />
+    <Compile Include="..\..\ModuleClaims.cs" Link="Module\ModuleClaims.cs" />
+    <Compile Include="..\..\FaceOsc.cs" Link="Module\FaceOsc.cs" />
+    <Compile Include="..\..\FaceMapping.cs" Link="Module\FaceMapping.cs" />
+    <Compile Include="..\..\FaceSettings.cs" Link="Module\FaceSettings.cs" />
+    <Compile Include="..\..\FaceReceiver.cs" Link="Module\FaceReceiver.cs" />
+    <Compile Include="..\..\StatusKeeper.cs" Link="Module\StatusKeeper.cs" />
+  </ItemGroup>
+
+  <!-- Copied next to the harness (its own bin folder) so it can run; the module itself never ships them. -->
+  <ItemGroup>
+    <Reference Include="VRCFaceTracking.SDK">
+      <HintPath>$(HarnessVrcftDir)\VRCFaceTracking.SDK.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="VRCFaceTracking.Core">
+      <HintPath>$(HarnessVrcftDir)\VRCFaceTracking.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Microsoft.Extensions.Logging.Abstractions">
+      <HintPath>$(HarnessVrcftDir)\Microsoft.Extensions.Logging.Abstractions.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+</Project>

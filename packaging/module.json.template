@@ -7,9 +7,9 @@
   "Ratings": 0,
   "Rating": 0.0,
   "AuthorName": "OTT Labs",
-  "ModuleName": "Steam Frame Eye (network)",
-  "ModuleDescription": "Per-eye gaze and eyelid openness from the Valve Steam Frame's built-in eye tracking, received over UDP from a small sender running on the headset.",
-  "UsageInstructions": "Install FrameEye Bridge on the headset (github.com/BowmanFox/SteamFrameEye) and enter this PC's address in its SteamVR dashboard tab. Data flows while the headset is worn.",
+  "ModuleName": "Steam Frame Eye + Face (network)",
+  "ModuleDescription": "Per-eye gaze and eyelid openness from the Valve Steam Frame's eye tracking (FrameEye Bridge, UDP 9021), plus mouth and face expressions from Baballonia (OSC on 127.0.0.1:8888) for a VIVE Facial Tracker on the Frame (FrameFace).",
+  "UsageInstructions": "Eyes: install FrameEye Bridge on the headset. Face: install FrameFace (headset/frameface/install-frameface.ps1), point Baballonia's Face Camera Address at the printed URL as Wireless/IP Camera, and do not install VRCFT-Babble. See github.com/BowmanFox/SteamFrameEye.",
   "DownloadUrl": "__DOWNLOAD_URL__",
   "ModulePageUrl": "__PAGE_URL__",
   "DllFileName": "SteamFrameEyeModule.dll"

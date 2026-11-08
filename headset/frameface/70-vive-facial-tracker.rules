@@ -1,0 +1,2 @@
+# SPDX-License-Identifier: MIT
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0bb4", ATTR{idProduct}=="0321", MODE="0660", GROUP="video", TAG+="uaccess"
